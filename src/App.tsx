@@ -13,12 +13,14 @@ import {
   FolderOpen,
   LayoutDashboard,
   LogOut,
+  Menu,
   Plus,
   RefreshCw,
   Search,
   Send,
   ShieldCheck,
   Upload,
+  X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
@@ -158,56 +160,100 @@ function LoginPage({ go }: { go: (screen: Screen) => void }) {
 }
 
 function AppShell({ screen, go, children }: { screen: Screen; go: (screen: Screen) => void; children: React.ReactNode }) {
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const items = [
     { label: "Dashboard", screen: "dashboard" as Screen, icon: <LayoutDashboard className="h-4 w-4" /> },
     { label: "Nuevo Siniestro", screen: "new" as Screen, icon: <Plus className="h-4 w-4" /> },
     { label: "Expediente", screen: "detail" as Screen, icon: <FolderOpen className="h-4 w-4" /> },
     { label: "Informe Final", screen: "report" as Screen, icon: <FileText className="h-4 w-4" /> },
   ];
+  const navigateFromMenu = (nextScreen: Screen) => {
+    go(nextScreen);
+    setIsMobileMenuOpen(false);
+  };
+  const renderSidebarContent = () => (
+    <>
+      <div className="flex items-center gap-3">
+        <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-brand-700 shadow-sm">
+          <ShieldCheck className="h-6 w-6" />
+        </div>
+        <div>
+          <p className="font-bold text-white">Asistente IA</p>
+          <p className="text-xs font-medium text-slate-400">Siniestros de Transporte</p>
+        </div>
+      </div>
+      <nav className="mt-9 space-y-1">
+        {items.map((item) => (
+          <button
+            key={item.label}
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition ${
+              screen === item.screen ? "bg-white text-slate-950 shadow-sm" : "text-slate-300 hover:bg-white/10 hover:text-white"
+            }`}
+            onClick={() => navigateFromMenu(item.screen)}
+            type="button"
+          >
+            {item.icon}
+            {item.label}
+          </button>
+        ))}
+      </nav>
+      <div className="mt-auto rounded-lg border border-white/10 bg-white/5 p-4">
+        <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Demo estática</p>
+        <p className="mt-2 text-sm leading-6 text-slate-300">Sin backend, APIs, autenticación real ni carga de archivos.</p>
+      </div>
+    </>
+  );
 
   return (
     <div className="min-h-screen bg-[#f5f7fb]">
-      <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 border-r border-slate-800 bg-slate-950 p-5 text-white lg:block">
-        <div className="flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-white text-brand-700 shadow-sm">
-            <ShieldCheck className="h-6 w-6" />
-          </div>
-          <div>
-            <p className="font-bold text-white">Asistente IA</p>
-            <p className="text-xs font-medium text-slate-400">Siniestros de Transporte</p>
-          </div>
-        </div>
-        <nav className="mt-9 space-y-1">
-          {items.map((item) => (
-            <button
-              key={item.label}
-              className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm font-semibold transition ${
-                screen === item.screen ? "bg-white text-slate-950 shadow-sm" : "text-slate-300 hover:bg-white/10 hover:text-white"
-              }`}
-              onClick={() => go(item.screen)}
-              type="button"
-            >
-              {item.icon}
-              {item.label}
-            </button>
-          ))}
-        </nav>
-        <div className="absolute bottom-5 left-5 right-5 rounded-lg border border-white/10 bg-white/5 p-4">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Demo estática</p>
-          <p className="mt-2 text-sm leading-6 text-slate-300">Sin backend, APIs, autenticación real ni carga de archivos.</p>
-        </div>
+      <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 flex-col border-r border-slate-800 bg-slate-950 p-5 text-white lg:flex">
+        {renderSidebarContent()}
       </aside>
+      {isMobileMenuOpen && (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <button
+            aria-label="Cerrar menú"
+            className="absolute inset-0 bg-slate-950/55 backdrop-blur-sm"
+            onClick={() => setIsMobileMenuOpen(false)}
+            type="button"
+          />
+          <aside className="relative flex h-full w-[min(82vw,320px)] flex-col bg-slate-950 p-5 text-white shadow-2xl">
+            <div className="mb-6 flex items-center justify-between">
+              <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Menú</p>
+              <button
+                aria-label="Cerrar menú"
+                className="rounded-lg p-2 text-slate-300 hover:bg-white/10 hover:text-white"
+                onClick={() => setIsMobileMenuOpen(false)}
+                type="button"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            {renderSidebarContent()}
+          </aside>
+        </div>
+      )}
       <div className="lg:pl-72">
         <header className="sticky top-0 z-10 border-b border-slate-200/80 bg-white/85 px-5 py-4 shadow-sm shadow-slate-200/40 backdrop-blur lg:px-8">
           <div className="flex items-center justify-between gap-4">
-            <div>
-              <p className="text-xs font-bold uppercase tracking-wide text-brand-700">Siniestros Express AI</p>
-              <p className="text-sm text-slate-600">Gestión documental asistida para ramo Transporte</p>
+            <div className="flex min-w-0 items-center gap-3">
+              <button
+                aria-label="Abrir menú"
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 shadow-sm lg:hidden"
+                onClick={() => setIsMobileMenuOpen(true)}
+                type="button"
+              >
+                <Menu className="h-5 w-5" />
+              </button>
+              <div className="min-w-0">
+                <p className="truncate text-xs font-bold uppercase tracking-wide text-brand-700">Siniestros Express AI</p>
+                <p className="truncate text-sm text-slate-600">Gestión documental asistida para ramo Transporte</p>
+              </div>
             </div>
             <div className="flex items-center gap-3">
               <div className="hidden text-right sm:block">
                 <p className="text-sm font-bold text-slate-900">Enrique Custodio</p>
-                <p className="text-xs text-slate-500">Ajustadora</p>
+                <p className="text-xs text-slate-500">Ajustador</p>
               </div>
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-950 font-bold text-white shadow-sm">EC</div>
               <button className="rounded-lg p-2 text-slate-500 hover:bg-slate-100" onClick={() => go("login")} type="button">
