@@ -31,7 +31,7 @@ type AnalysisResult = "faltante" | "informe";
 type SortDirection = "asc" | "desc";
 type SortKey = keyof Pick<
   ClaimCase,
-  "id" | "insurer" | "insured" | "riskType" | "claimedAmount" | "adjuster" | "status" | "lastUpdate"
+  "id" | "insurer" | "insured" | "riskType" | "subCategory" | "claimedAmount" | "adjuster" | "status" | "lastUpdate"
 >;
 
 const routeByScreen: Record<Screen, string> = {
@@ -284,6 +284,7 @@ function DashboardPage({ go }: { go: (screen: Screen) => void }) {
     { label: "Aseguradora", width: "min-w-[190px]", sortKey: "insurer" },
     { label: "Asegurado", width: "min-w-[230px]", sortKey: "insured" },
     { label: "Tipo de riesgo", width: "min-w-[170px]", sortKey: "riskType" },
+    { label: "Sub categoría", width: "min-w-[240px]", sortKey: "subCategory" },
     { label: "Monto reclamado", width: "min-w-[190px]", sortKey: "claimedAmount" },
     { label: "Ajustador", width: "min-w-[210px]", sortKey: "adjuster" },
     { label: "Estado", width: "min-w-[210px]", sortKey: "status" },
@@ -322,6 +323,7 @@ function DashboardPage({ go }: { go: (screen: Screen) => void }) {
           item.policyNumber,
           item.status,
           item.riskType,
+          item.subCategory,
         ]
           .join(" ")
           .toLocaleLowerCase("es")
@@ -433,7 +435,7 @@ function DashboardPage({ go }: { go: (screen: Screen) => void }) {
           </div>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1700px] text-left text-sm">
+          <table className="w-full min-w-[1940px] text-left text-sm">
             <thead className="bg-slate-100/80 text-xs font-bold uppercase tracking-wide text-slate-500">
               <tr>
                 {tableColumns.map((column) => (
@@ -472,6 +474,7 @@ function DashboardPage({ go }: { go: (screen: Screen) => void }) {
                   <td className="px-6 py-5 text-slate-700">{item.insurer}</td>
                   <td className="px-6 py-5 font-medium text-slate-900">{item.insured}</td>
                   <td className="px-6 py-5 text-slate-600">{item.riskType}</td>
+                  <td className="px-6 py-5 text-slate-600">{item.subCategory}</td>
                   <td className="px-6 py-5 font-semibold text-slate-900">{formatMoney(item.claimedAmount)}</td>
                   <td className="px-6 py-5 text-slate-600">{item.adjuster}</td>
                   <td className="px-6 py-5"><StatusBadge status={item.status} /></td>
@@ -658,6 +661,8 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
               ["Aseguradora", item.insurer],
               ["Asegurado", item.insured],
               ["Corredor", item.broker],
+              ["Tipo de riesgo", item.riskType],
+              ["Sub categoría", item.subCategory],
               ["Póliza", item.policyNumber],
               ["Monto reclamado", formatMoney(item.claimedAmount)],
               ["Estado actual", isGenerated ? "Informe generado" : "Información faltante"],

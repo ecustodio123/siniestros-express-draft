@@ -5,6 +5,13 @@ export type CaseStatus =
   | "Completado";
 
 export type DocumentStatus = "Recibido" | "Pendiente" | "Adjunto simulado";
+export type RiskType = "Transporte" | "Importaciones / Exportaciones";
+export type CaseSubCategory =
+  | "Flota propia"
+  | "Transportista contratado"
+  | "Responsabilidad del transportista"
+  | "Tránsito internacional"
+  | "Tramo terrestre post importación";
 
 export type CaseDocument = {
   name: string;
@@ -16,7 +23,8 @@ export type ClaimCase = {
   insurer: string;
   insured: string;
   broker: string;
-  riskType: "Transporte";
+  riskType: RiskType;
+  subCategory: CaseSubCategory;
   claimedAmount: number;
   adjuster: string;
   status: CaseStatus;
@@ -35,6 +43,7 @@ export const cases: ClaimCase[] = [
     insured: "Transportes Andina SAC",
     broker: "Broker Risk Perú",
     riskType: "Transporte",
+    subCategory: "Flota propia",
     claimedAmount: 128500,
     adjuster: "Carlos Caro",
     status: "Informe generado",
@@ -56,6 +65,7 @@ export const cases: ClaimCase[] = [
     insured: "Logística Norte EIRL",
     broker: "Aon Perú",
     riskType: "Transporte",
+    subCategory: "Transportista contratado",
     claimedAmount: 76200,
     adjuster: "Fabricio Sotelo",
     status: "Información faltante",
@@ -77,6 +87,7 @@ export const cases: ClaimCase[] = [
     insured: "Carga Express del Sur",
     broker: "Marsh Perú",
     riskType: "Transporte",
+    subCategory: "Responsabilidad del transportista",
     claimedAmount: 44200,
     adjuster: "Jose Kldas",
     status: "Información faltante",
@@ -97,14 +108,15 @@ export const cases: ClaimCase[] = [
     insurer: "Mapfre Perú",
     insured: "Distribuciones Santa Rosa",
     broker: "Willis Towers Watson",
-    riskType: "Transporte",
+    riskType: "Importaciones / Exportaciones",
+    subCategory: "Tránsito internacional",
     claimedAmount: 211900,
     adjuster: "Enrique Custodio",
     status: "Completado",
     lastUpdate: "23 Jun 2026",
     policyNumber: "TR-120945",
     contact: "gerencia@dsantarosa.pe · +51 933 818 774",
-    description: "Diferencia entre monto facturado y carga reportada como dañada en destino.",
+    description: "Daño reportado durante tránsito internacional de mercancía importada.",
     documents: [
       { name: "Denuncia policial", status: "Recibido" },
       { name: "Documentos del chofer/camión", status: "Recibido" },
@@ -119,6 +131,7 @@ export const cases: ClaimCase[] = [
     insured: "Frío Cargo Perú",
     broker: "Corredores Unidos",
     riskType: "Transporte",
+    subCategory: "Transportista contratado",
     claimedAmount: 93500,
     adjuster: "Carlos Caro",
     status: "Registrado",
@@ -139,7 +152,8 @@ export const cases: ClaimCase[] = [
     insurer: "Chubb Perú",
     insured: "Importadora Altamar",
     broker: "Risk Partners",
-    riskType: "Transporte",
+    riskType: "Importaciones / Exportaciones",
+    subCategory: "Tramo terrestre post importación",
     claimedAmount: 158700,
     adjuster: "Fabricio Sotelo",
     status: "Completado",
