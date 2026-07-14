@@ -124,7 +124,8 @@ export type Recordatorio = {
  *  vuelta bajo `datos_formulario` solo para que la UI los reexhiba: no
  *  participan en el cálculo del veredicto, que sale únicamente de los
  *  documentos (así la traza del motor sigue siendo una cita fiel de sus
- *  fuentes documentales). */
+ *  fuentes documentales). Verificado contra `api/main.py::crear_siniestro`:
+ *  estos siete campos son los únicos que vuelven en `datos_formulario`. */
 export type CamposExpediente = {
   aseguradora: string;
   asegurado: string;
@@ -133,6 +134,49 @@ export type CamposExpediente = {
   numero_poliza: string;
   monto_reclamado: string;
   descripcion: string;
+};
+
+/**
+ * Datos de OPERADOR: a diferencia de `CamposExpediente`, estos SÍ entran al
+ * `case` y SÍ pueden cambiar el veredicto (ver `api/main.py::crear_siniestro`,
+ * parámetros `prima_pagada`/`fecha_aviso`, y `ingestion/schema.py::CAMPOS_OPERADOR`).
+ * Por eso NO viajan de vuelta en `datos_formulario` — no son texto para
+ * reexhibir, son evidencia que el motor usó.
+ *
+ * Su fuente legítima es el operador (ajustador) porque ningún documento del
+ * expediente los declara; en producción vendrían del sistema de la
+ * aseguradora. Se modelan como `string` porque así los recibe el `Form(...)`
+ * de FastAPI: `""` significa "no declarado", y el motor lo trata igual que
+ * un campo ausente — deriva a ESCALADO por dato faltante, nunca inventa un
+ * valor. `prima_pagada` acepta exactamente "true" o "false" (cualquier otra
+ * cosa, incluida la cadena vacía, se interpreta como no declarado); `fecha_aviso`
+ * exige el formato `YYYY-MM-DD` (el mismo que produce un `<input type="date">`).
+ *
+ * `escenario` es la excepción: hoy `crear_siniestro` no lo declara como
+ * parámetro, así que la API lo ignora sin error. Se envía de todas formas
+ * porque cablearlo ahora ahorra otra ronda de cambios en el frontend cuando
+ * la API lo adopte (tarea futura).
+ */
+export type DatosOperador = {
+  escenario: string;
+  prima_pagada: string;
+  fecha_aviso: string;
+};
+
+/** Discrepancia entre un dato de operador (`DatosOperador`) y lo que ya
+ *  había traído la extracción para el mismo campo: gana siempre la
+ *  extracción (evidencia documental > declaración sin respaldo), pero el
+ *  conflicto se reporta igual para que el ajustador lo vea — nunca se
+ *  resuelve en silencio. Ver `ingestion/pipeline.py::_fusionar_datos_operador`. */
+export type DiscrepanciaDatosOperador = Record<string, { extraido: ValorJson; operador: ValorJson }>;
+
+/** Un documento condicional del escenario clasificado (catálogo Protegia
+ *  2021): NUNCA cuenta como faltante en G6.1 — su ausencia es normal si la
+ *  condición no aplica (p. ej. la aseguradora no hizo salvamento). Es
+ *  puramente informativo. Ver `engine/helpers.py::CATALOGO_PROTEGIA_2021_CONDICIONALES`. */
+export type DocumentoCondicional = {
+  id: string;
+  condicion: string;
 };
 
 /** Forma exacta de la respuesta de `POST /api/siniestros`. */
@@ -144,13 +188,19 @@ export type RespuestaAnalisis = {
   traza: PasoTraza[];
   clasificacion: Clasificacion | null;
   discrepancia_escenario: DiscrepanciaEscenario | null;
+  discrepancia_datos_operador: DiscrepanciaDatosOperador | null;
   problemas_extraccion: string[];
   pre_analisis_ia: PreAnalisisIA | null;
   informe_md: string | null;
   carta_sbs: string | null;
   indemnizacion: Indemnizacion | null;
   recordatorios: Recordatorio[] | null;
+  // `faltantes` son ids de documento (p. ej. "guia_remision"), NUNCA
+  // etiquetas listas para pintar: siempre traducir con `etiquetas_documentos`
+  // antes de mostrarlos (ver `api/esquema.py::construir_respuesta`).
   faltantes: string[];
+  condicionales: DocumentoCondicional[];
+  etiquetas_documentos: Record<string, string>;
   datos_formulario: CamposExpediente;
 };
 
@@ -158,21 +208,24 @@ const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 const API_KEY = import.meta.env.VITE_API_KEY ?? "";
 
 /**
- * Envía el expediente (campos del formulario + archivos adjuntos) al motor
- * de reglas y devuelve su veredicto.
+ * Envía el expediente (campos del formulario + datos de operador + archivos
+ * adjuntos) al motor de reglas y devuelve su veredicto.
  *
- * Un 200 con `veredicto: "ESCALADO"` (p. ej. por extracción incompleta) NO
- * es un error: es el motor derivando el caso a un humano. Esta función solo
- * lanza si la API responde con un código de error (401 clave inválida, 413
- * petición demasiado grande, 415 extensión no soportada, 502 fallo del
- * proveedor de IA, etc.).
+ * Un 200 con `veredicto: "ESCALADO"` (p. ej. por extracción incompleta, o por
+ * no haber declarado `prima_pagada`/`fecha_aviso`) NO es un error: es el
+ * motor derivando el caso a un humano. Esta función solo lanza si la API
+ * responde con un código de error (401 clave inválida, 413 petición
+ * demasiado grande, 415 extensión no soportada, 502 fallo del proveedor de
+ * IA, etc.).
  */
 export async function analizarSiniestro(
   campos: CamposExpediente,
   archivos: File[],
+  datosOperador: DatosOperador,
 ): Promise<RespuestaAnalisis> {
   const cuerpo = new FormData();
   Object.entries(campos).forEach(([clave, valor]) => cuerpo.append(clave, valor));
+  Object.entries(datosOperador).forEach(([clave, valor]) => cuerpo.append(clave, valor));
   archivos.forEach((archivo) => cuerpo.append("archivos", archivo));
 
   const respuesta = await fetch(`${API_URL}/api/siniestros`, {

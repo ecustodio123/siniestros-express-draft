@@ -22,15 +22,15 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { CaseStatus, ClaimCase, cases, featuredCase } from "./data/mockCases";
+import { CaseSubCategory, CaseStatus, ClaimCase, cases, claimTypeOptions, featuredCase } from "./data/mockCases";
 import { analizarSiniestro, estadoDeVeredicto, guardarResultado, leerResultado } from "./api";
-import type { CamposExpediente, Confianza, PasoTraza, PreAnalisisIA, RespuestaAnalisis, Veredicto, ValorJson } from "./api";
+import type { CamposExpediente, Confianza, DatosOperador, PasoTraza, PreAnalisisIA, RespuestaAnalisis, Veredicto, ValorJson } from "./api";
 
 type Screen = "login" | "dashboard" | "new" | "confirmation" | "detail" | "report";
 type SortDirection = "asc" | "desc";
 type SortKey = keyof Pick<
   ClaimCase,
-  "id" | "insurer" | "insured" | "riskType" | "claimedAmount" | "adjuster" | "status" | "lastUpdate"
+  "id" | "insurer" | "insured" | "riskType" | "subCategory" | "claimedAmount" | "adjuster" | "status" | "lastUpdate"
 >;
 
 const routeByScreen: Record<Screen, string> = {
@@ -293,6 +293,7 @@ function DashboardPage({ go }: { go: (screen: Screen) => void }) {
     { label: "Aseguradora", width: "min-w-[190px]", sortKey: "insurer" },
     { label: "Asegurado", width: "min-w-[230px]", sortKey: "insured" },
     { label: "Tipo de riesgo", width: "min-w-[170px]", sortKey: "riskType" },
+    { label: "Sub categoría", width: "min-w-[240px]", sortKey: "subCategory" },
     { label: "Monto reclamado", width: "min-w-[190px]", sortKey: "claimedAmount" },
     { label: "Ajustador", width: "min-w-[210px]", sortKey: "adjuster" },
     { label: "Estado", width: "min-w-[210px]", sortKey: "status" },
@@ -331,6 +332,7 @@ function DashboardPage({ go }: { go: (screen: Screen) => void }) {
           item.policyNumber,
           item.status,
           item.riskType,
+          item.subCategory,
         ]
           .join(" ")
           .toLocaleLowerCase("es")
@@ -442,7 +444,7 @@ function DashboardPage({ go }: { go: (screen: Screen) => void }) {
           </div>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1700px] text-left text-sm">
+          <table className="w-full min-w-[1940px] text-left text-sm">
             <thead className="bg-slate-100/80 text-xs font-bold uppercase tracking-wide text-slate-500">
               <tr>
                 {tableColumns.map((column) => (
@@ -481,6 +483,7 @@ function DashboardPage({ go }: { go: (screen: Screen) => void }) {
                   <td className="px-6 py-5 text-slate-700">{item.insurer}</td>
                   <td className="px-6 py-5 font-medium text-slate-900">{item.insured}</td>
                   <td className="px-6 py-5 text-slate-600">{item.riskType}</td>
+                  <td className="px-6 py-5 text-slate-600">{item.subCategory}</td>
                   <td className="px-6 py-5 font-semibold text-slate-900">{formatMoney(item.claimedAmount)}</td>
                   <td className="px-6 py-5 text-slate-600">{item.adjuster}</td>
                   <td className="px-6 py-5"><StatusBadge status={item.status} /></td>
@@ -514,17 +517,75 @@ const CAMPOS_EXPEDIENTE: { clave: keyof CamposExpediente; etiqueta: string }[] =
   { clave: "monto_reclamado", etiqueta: "Monto reclamado" },
 ];
 
-// La Póliza es obligatoria: sin ella el extractor no puede obtener vigencia,
-// prima, riesgos cubiertos ni suma asegurada — campos núcleo del `case` en
-// `ingestion/schema.py`. Sin este documento, `validar_case` deriva el caso a
-// ESCALADO por extracción incompleta.
-const DOCUMENTOS_REQUERIDOS = [
-  "Póliza",
-  "Denuncia Policial",
-  "Documentos del chofer o camión",
-  "Guías de remisión",
-  "Facturas",
+// Único lugar donde vive la correspondencia subcategoría -> escenario del
+// motor de reglas (T1..I2). Si el motor suma un escenario o el dashboard una
+// subcategoría, se actualiza aquí y en ningún otro sitio.
+const ESCENARIO_POR_SUBCATEGORIA: Record<CaseSubCategory, string> = {
+  "Flota propia": "T1",
+  "Transportista contratado": "T2",
+  "Responsabilidad del transportista": "T3",
+  "Tránsito internacional": "I1",
+  "Tramo terrestre post importación": "I2",
+};
+
+// Opciones del control de "prima pagada". El valor vacío ("no especificado")
+// es una opción legítima, no un estado a evitar: ver `DatosOperador` en
+// `api.ts`. Si el operador no lo declara, el motor deriva el caso a revisión
+// humana por dato ausente — comportamiento correcto, no un fallo.
+const OPCIONES_PRIMA_PAGADA: { valor: "" | "true" | "false"; etiqueta: string }[] = [
+  { valor: "", etiqueta: "No especificado" },
+  { valor: "true", etiqueta: "Sí" },
+  { valor: "false", etiqueta: "No" },
 ];
+
+/** Tarjeta de un documento adjuntable. `obligatorio` solo cambia el
+ *  ROTULADO del estado vacío ("Pendiente" en ámbar vs. "Adjuntar si aplica"
+ *  en gris neutro): un condicional sin adjuntar es normal, no una carencia
+ *  — ver el comentario junto a `conditionalDocuments` en `data/mockCases.ts`. */
+function TarjetaDocumento({
+  documento,
+  archivos,
+  onSeleccionar,
+  obligatorio,
+}: {
+  documento: string;
+  archivos: File[];
+  onSeleccionar: (archivos: File[]) => void;
+  obligatorio: boolean;
+}) {
+  const tieneArchivos = archivos.length > 0;
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-4 transition hover:border-brand-200 hover:bg-white">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <div className="rounded-lg bg-white p-2 text-slate-600 shadow-sm ring-1 ring-slate-200">
+            <Upload className="h-5 w-5" />
+          </div>
+          <div>
+            <p className="font-semibold text-slate-900">{documento}</p>
+            <p className={`mt-1 text-sm font-medium ${tieneArchivos ? "text-emerald-700" : obligatorio ? "text-amber-700" : "text-slate-500"}`}>
+              {tieneArchivos
+                ? archivos.map((archivo) => archivo.name).join(", ")
+                : obligatorio
+                  ? "Pendiente"
+                  : "Adjuntar si aplica"}
+            </p>
+          </div>
+        </div>
+        <label className="shrink-0 cursor-pointer rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50">
+          Seleccionar
+          <input
+            type="file"
+            multiple
+            accept=".pdf,.jpg,.jpeg,.png,.webp"
+            className="hidden"
+            onChange={(e) => onSeleccionar(Array.from(e.target.files ?? []))}
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
 
 function NewCasePage({ go }: { go: (screen: Screen) => void }) {
   const [campos, setCampos] = useState<CamposExpediente>({
@@ -536,10 +597,25 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
     monto_reclamado: "",
     descripcion: "",
   });
+  const [selectedSubCategory, setSelectedSubCategory] = useState<CaseSubCategory>(claimTypeOptions[0].subCategory);
+  const [isChoosingClaimType, setIsChoosingClaimType] = useState(true);
   const [archivosPorDocumento, setArchivosPorDocumento] = useState<Record<string, File[]>>({});
+  const [primaPagada, setPrimaPagada] = useState<"" | "true" | "false">("");
+  const [fechaAviso, setFechaAviso] = useState("");
   const [analizando, setAnalizando] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
+
+  const selectedClaimTypeOption =
+    claimTypeOptions.find((option) => option.subCategory === selectedSubCategory) ?? claimTypeOptions[0];
+  const docsObligatorios = selectedClaimTypeOption.requiredDocuments;
+  const docsCondicionales = selectedClaimTypeOption.conditionalDocuments;
+  const selectedClaimTypeLabel = `${selectedClaimTypeOption.riskType} - ${selectedClaimTypeOption.subCategory}`;
+  const selectClaimType = (subCategory: CaseSubCategory) => {
+    setSelectedSubCategory(subCategory);
+    setArchivosPorDocumento({});
+    setIsChoosingClaimType(false);
+  };
 
   const todosLosArchivos = Object.values(archivosPorDocumento).flat();
   const faltaPoliza = !(archivosPorDocumento["Póliza"]?.length);
@@ -548,7 +624,14 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
     setError(null);
     setAnalizando(true);
     try {
-      const respuesta = await analizarSiniestro(campos, todosLosArchivos);
+      // El tipo elegido en la pantalla anterior viaja como el escenario del
+      // motor (T1..I2): ver ESCENARIO_POR_SUBCATEGORIA más arriba.
+      const datosOperador: DatosOperador = {
+        escenario: ESCENARIO_POR_SUBCATEGORIA[selectedSubCategory],
+        prima_pagada: primaPagada,
+        fecha_aviso: fechaAviso,
+      };
+      const respuesta = await analizarSiniestro(campos, todosLosArchivos, datosOperador);
       guardarResultado(respuesta);
       navigate("/siniestros/confirmacion");
     } catch (e) {
@@ -557,6 +640,61 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
       setAnalizando(false);
     }
   };
+
+  if (isChoosingClaimType) {
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-col justify-between gap-4 rounded-lg border border-slate-200/80 bg-white px-6 py-5 shadow-[0_18px_45px_rgba(15,23,42,0.05)] sm:flex-row sm:items-center">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-wide text-brand-700">Nuevo siniestro</p>
+            <h1 className="mt-1 text-3xl font-bold text-slate-950">Selecciona el tipo de siniestro</h1>
+            <p className="mt-2 text-slate-500">La documentación requerida se ajustará automáticamente según la subcategoría elegida.</p>
+          </div>
+          <Button variant="secondary" onClick={() => go("dashboard")}>Cancelar</Button>
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-2">
+          {claimTypeOptions.map((option) => (
+            <button
+              key={option.subCategory}
+              className="group rounded-lg border border-slate-200 bg-white p-5 text-left shadow-[0_18px_45px_rgba(15,23,42,0.06)] transition hover:border-brand-200 hover:shadow-[0_22px_55px_rgba(37,99,235,0.12)]"
+              onClick={() => selectClaimType(option.subCategory)}
+              type="button"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wide text-slate-400">{option.riskType}</p>
+                  <h2 className="mt-2 text-xl font-bold text-slate-950">{option.subCategory}</h2>
+                  <p className="mt-3 text-sm leading-6 text-slate-500">
+                    {option.requiredDocuments.length} documentos obligatorios
+                    {option.conditionalDocuments.length > 0 &&
+                      ` · ${option.conditionalDocuments.length} condicionales (si aplica)`}
+                    {" "}para iniciar la revisión documental.
+                  </p>
+                </div>
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-slate-50 text-brand-700 ring-1 ring-slate-200 transition group-hover:bg-brand-700 group-hover:text-white">
+                  <FileText className="h-5 w-5" />
+                </div>
+              </div>
+              <div className="mt-5 flex flex-wrap gap-2">
+                {option.requiredDocuments.slice(0, 3).map((doc) => (
+                  <span key={doc} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+                    {doc}
+                  </span>
+                ))}
+                {option.requiredDocuments.length > 3 && (
+                  <span className="rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700">
+                    +{option.requiredDocuments.length - 3} más
+                  </span>
+                )}
+              </div>
+              <div className="mt-5 text-sm font-bold text-brand-700">Seleccionar y continuar</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -580,8 +718,25 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
               </label>
             ))}
             <label className="block">
+              <span className="text-sm font-semibold text-slate-700">Tipo de siniestro</span>
+              <div className="mt-2 rounded-lg border border-brand-100 bg-brand-50 p-4">
+                <p className="font-bold text-brand-900">{selectedClaimTypeLabel}</p>
+                <button
+                  className="mt-2 text-sm font-bold text-brand-700 hover:text-brand-900"
+                  onClick={() => setIsChoosingClaimType(true)}
+                  type="button"
+                >
+                  Cambiar tipo
+                </button>
+              </div>
+            </label>
+            <label className="block">
               <span className="text-sm font-semibold text-slate-700">Tipo de riesgo</span>
-              <input className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-3 text-slate-600" value="Transporte" readOnly />
+              <input className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-3 text-slate-600" value={selectedClaimTypeOption.riskType} readOnly />
+            </label>
+            <label className="block md:col-span-2">
+              <span className="text-sm font-semibold text-slate-700">Subcategoría</span>
+              <input className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-3 text-slate-600" value={selectedClaimTypeOption.subCategory} readOnly />
             </label>
             <label className="block md:col-span-2">
               <span className="text-sm font-semibold text-slate-700">Descripción del siniestro</span>
@@ -593,49 +748,87 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
               />
             </label>
           </div>
+
+          <div className="mt-6 rounded-lg border border-slate-200 bg-slate-50/80 p-4">
+            <p className="text-sm font-bold text-slate-900">Datos que declara el operador</p>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              Ningún documento del expediente los contiene: en producción llegarían del sistema de la
+              aseguradora. El ajustador sí los conoce. Si se dejan sin declarar, el motor deriva el caso a
+              revisión del ajustador por dato ausente — es el comportamiento correcto, no un error.
+            </p>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <div>
+                <span className="text-sm font-semibold text-slate-700">¿La prima está pagada?</span>
+                <div className="mt-2 inline-flex overflow-hidden rounded-lg border border-slate-200 bg-white">
+                  {OPCIONES_PRIMA_PAGADA.map((opcion) => (
+                    <button
+                      key={opcion.valor}
+                      type="button"
+                      onClick={() => setPrimaPagada(opcion.valor)}
+                      className={`px-4 py-2 text-sm font-semibold transition ${
+                        primaPagada === opcion.valor ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-50"
+                      }`}
+                    >
+                      {opcion.etiqueta}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="block">
+                <span className="text-sm font-semibold text-slate-700">Fecha de aviso a la aseguradora</span>
+                <input
+                  type="date"
+                  value={fechaAviso}
+                  onChange={(e) => setFechaAviso(e.target.value)}
+                  className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-3 outline-none transition focus:border-brand-600 focus:ring-4 focus:ring-blue-100"
+                />
+              </label>
+            </div>
+          </div>
         </Card>
 
         <Card className="p-6">
           <h2 className="text-lg font-bold text-slate-950">Documentos requeridos</h2>
-          <p className="mt-1 text-sm text-slate-500">PDF o imágenes. La póliza es indispensable para evaluar la cobertura.</p>
+          <p className="mt-1 text-sm text-slate-500">
+            Requisitos para {selectedClaimTypeLabel}. PDF o imágenes; la póliza es indispensable para evaluar la cobertura.
+          </p>
           <div className="mt-5 grid gap-3">
-            {DOCUMENTOS_REQUERIDOS.map((documento) => {
-              const adjuntos = archivosPorDocumento[documento] ?? [];
-              return (
-                <div key={documento} className="rounded-lg border border-slate-200 bg-slate-50/60 p-4 transition hover:border-brand-200 hover:bg-white">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-start gap-3">
-                      <div className="rounded-lg bg-white p-2 text-slate-600 shadow-sm ring-1 ring-slate-200">
-                        <Upload className="h-5 w-5" />
-                      </div>
-                      <div>
-                        <p className="font-semibold text-slate-900">{documento}</p>
-                        <p className={`mt-1 text-sm font-medium ${adjuntos.length ? "text-emerald-700" : "text-amber-700"}`}>
-                          {adjuntos.length ? adjuntos.map((archivo) => archivo.name).join(", ") : "Pendiente"}
-                        </p>
-                      </div>
-                    </div>
-                    <label className="shrink-0 cursor-pointer rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50">
-                      Seleccionar
-                      <input
-                        type="file"
-                        multiple
-                        accept=".pdf,.jpg,.jpeg,.png,.webp"
-                        className="hidden"
-                        onChange={(e) =>
-                          setArchivosPorDocumento((prev) => ({ ...prev, [documento]: Array.from(e.target.files ?? []) }))
-                        }
-                      />
-                    </label>
-                  </div>
-                </div>
-              );
-            })}
+            {docsObligatorios.map((documento) => (
+              <TarjetaDocumento
+                key={documento}
+                documento={documento}
+                archivos={archivosPorDocumento[documento] ?? []}
+                onSeleccionar={(archivos) => setArchivosPorDocumento((prev) => ({ ...prev, [documento]: archivos }))}
+                obligatorio
+              />
+            ))}
           </div>
           {faltaPoliza && (
             <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800">
               Sin la póliza no se puede evaluar la cobertura: el expediente se derivaría a revisión humana.
             </p>
+          )}
+
+          {docsCondicionales.length > 0 && (
+            <div className="mt-6 border-t border-slate-200 pt-5">
+              <h3 className="text-sm font-bold text-slate-900">Documentos condicionales</h3>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                Solo aplican si la aseguradora decide hacer salvamento o recupero legal (catálogo Protegia).
+                Su ausencia NO es una carencia: el motor nunca los exige para completar la revisión
+                documental (compuerta G6.1).
+              </p>
+              <div className="mt-4 grid gap-3">
+                {docsCondicionales.map((documento) => (
+                  <TarjetaDocumento
+                    key={documento}
+                    documento={documento}
+                    archivos={archivosPorDocumento[documento] ?? []}
+                    onSeleccionar={(archivos) => setArchivosPorDocumento((prev) => ({ ...prev, [documento]: archivos }))}
+                    obligatorio={false}
+                  />
+                ))}
+              </div>
+            </div>
           )}
         </Card>
       </div>
@@ -970,7 +1163,7 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
                 {resultado.faltantes.map((d) => (
                   <li key={d} className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
                     <Clock3 className="h-4 w-4 shrink-0" />
-                    {d}
+                    {resultado.etiquetas_documentos[d] ?? d}
                   </li>
                 ))}
               </ul>
@@ -979,6 +1172,23 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
                   Recordatorios: {resultado.recordatorios.map((r) => `${r.dias}d (${r.fecha ?? "fecha base no disponible"})`).join(" · ")}
                 </p>
               )}
+            </Card>
+          )}
+
+          {!!resultado.condicionales.length && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Documentos condicionales del escenario</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Informativo: su ausencia nunca cuenta como faltante (compuerta G6.1).
+              </p>
+              <ul className="mt-4 space-y-2">
+                {resultado.condicionales.map((c) => (
+                  <li key={c.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
+                    <p className="font-semibold text-slate-800">{resultado.etiquetas_documentos[c.id] ?? c.id}</p>
+                    <p className="mt-0.5 text-xs text-slate-500">{c.condicion}</p>
+                  </li>
+                ))}
+              </ul>
             </Card>
           )}
 
@@ -1004,6 +1214,27 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
                 clasificador calculó <strong>{resultado.discrepancia_escenario.clasificado}</strong>. El motor no pisa
                 uno con el otro: queda para revisión humana.
               </p>
+            </Card>
+          )}
+
+          {resultado.discrepancia_datos_operador && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Discrepancia con datos del operador</h2>
+              <p className="mt-2 text-sm text-slate-600">
+                Un dato declarado por el operador no coincidía con lo extraído del documento. Gana siempre
+                la evidencia documental; se reporta igual para que el ajustador lo revise.
+              </p>
+              <ul className="mt-3 space-y-2">
+                {Object.entries(resultado.discrepancia_datos_operador).map(([campo, valores]) => (
+                  <li key={campo} className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
+                    <p className="font-mono text-xs font-semibold text-slate-500">{campo}</p>
+                    <p className="mt-1 text-slate-700">
+                      Documento: <strong>{formatearValorEvidencia(valores.extraido)}</strong> · Operador:{" "}
+                      <strong>{formatearValorEvidencia(valores.operador)}</strong>
+                    </p>
+                  </li>
+                ))}
+              </ul>
             </Card>
           )}
         </div>

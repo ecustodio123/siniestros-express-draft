@@ -5,18 +5,118 @@ export type CaseStatus =
   | "Completado";
 
 export type DocumentStatus = "Recibido" | "Pendiente" | "Adjunto simulado";
+export type RiskType = "Transporte" | "Importaciones / Exportaciones";
+export type CaseSubCategory =
+  | "Flota propia"
+  | "Transportista contratado"
+  | "Responsabilidad del transportista"
+  | "Tránsito internacional"
+  | "Tramo terrestre post importación";
 
 export type CaseDocument = {
   name: string;
   status: DocumentStatus;
 };
 
+export type ClaimTypeOption = {
+  riskType: RiskType;
+  subCategory: CaseSubCategory;
+  requiredDocuments: string[];
+  // Documentos condicionales del catálogo Protegia 2021 (ver
+  // `engine/helpers.py::CATALOGO_PROTEGIA_2021_CONDICIONALES` en el motor):
+  // NUNCA cuentan como faltantes en la compuerta G6.1 — su ausencia es
+  // normal si la condición no aplica (p. ej. la aseguradora no hizo
+  // salvamento ni recupero legal). Se listan aparte para que la UI los
+  // ofrezca sin presentarlos como una carencia del expediente.
+  conditionalDocuments: string[];
+};
+
+// La Póliza encabeza los requisitos de las cinco subcategorías: sin ella el
+// extractor no puede obtener vigencia, prima, riesgos cubiertos ni suma
+// asegurada — campos núcleo del `case` en `ingestion/schema.py` del motor de
+// reglas. Sin este documento, `validar_case` deriva el caso a ESCALADO por
+// extracción incompleta, sin importar la subcategoría elegida.
+export const claimTypeOptions: ClaimTypeOption[] = [
+  {
+    riskType: "Transporte",
+    subCategory: "Flota propia",
+    requiredDocuments: [
+      "Póliza",
+      "Denuncia Policial",
+      "Proforma Valorizada de la Pérdida",
+      "Factura comercial",
+      "Guía de Remisión",
+      "Declaración del chofer",
+    ],
+    // "si la compañía está interesada en recoger los restos" (catálogo Protegia).
+    conditionalDocuments: ["Acta de Salvamento"],
+  },
+  {
+    riskType: "Transporte",
+    subCategory: "Transportista contratado",
+    requiredDocuments: [
+      "Póliza",
+      "Denuncia Policial",
+      "Proforma Valorizada de la Pérdida",
+      "Factura comercial",
+      "Guía de Remisión",
+      "Declaración del chofer",
+    ],
+    // "si la compañía está interesada en hacer un recupero por la vía legal" /
+    // "si aplica" (catálogo Protegia).
+    conditionalDocuments: ["Carta de Reclamo al transportista", "Acta de Salvamento"],
+  },
+  {
+    riskType: "Transporte",
+    subCategory: "Responsabilidad del transportista",
+    requiredDocuments: [
+      "Póliza",
+      "Denuncia Policial",
+      "Proforma Valorizada de la Pérdida",
+      "Factura comercial",
+      "Guía de Remisión",
+      "Declaración del chofer",
+      "Carta de Reclamo del dueño de la mercadería",
+    ],
+    conditionalDocuments: [],
+  },
+  {
+    riskType: "Importaciones / Exportaciones",
+    subCategory: "Tránsito internacional",
+    requiredDocuments: [
+      "Póliza",
+      "Conocimiento de embarque",
+      "Factura Comercial",
+      "Packing List",
+      "Valorización de la mercadería siniestrada",
+      "Volante de despacho",
+    ],
+    conditionalDocuments: [],
+  },
+  {
+    riskType: "Importaciones / Exportaciones",
+    subCategory: "Tramo terrestre post importación",
+    requiredDocuments: [
+      "Póliza",
+      "Conocimiento de Embarque o guía aérea",
+      "Factura Comercial",
+      "Packing List",
+      "Aplicación de seguro",
+      "Denuncia policial",
+      "Guía de remisión transportista",
+      "Valorización de la mercadería siniestrada",
+    ],
+    conditionalDocuments: [],
+  },
+];
+
 export type ClaimCase = {
   id: string;
   insurer: string;
   insured: string;
   broker: string;
-  riskType: "Transporte";
+  riskType: RiskType;
+  subCategory: CaseSubCategory;
   claimedAmount: number;
   adjuster: string;
   status: CaseStatus;
@@ -35,6 +135,7 @@ export const cases: ClaimCase[] = [
     insured: "Transportes Andina SAC",
     broker: "Broker Risk Perú",
     riskType: "Transporte",
+    subCategory: "Flota propia",
     claimedAmount: 128500,
     adjuster: "Carlos Caro",
     status: "Informe generado",
@@ -56,6 +157,7 @@ export const cases: ClaimCase[] = [
     insured: "Logística Norte EIRL",
     broker: "Aon Perú",
     riskType: "Transporte",
+    subCategory: "Transportista contratado",
     claimedAmount: 76200,
     adjuster: "Fabricio Sotelo",
     status: "Información faltante",
@@ -77,6 +179,7 @@ export const cases: ClaimCase[] = [
     insured: "Carga Express del Sur",
     broker: "Marsh Perú",
     riskType: "Transporte",
+    subCategory: "Responsabilidad del transportista",
     claimedAmount: 44200,
     adjuster: "Jose Kldas",
     status: "Información faltante",
@@ -97,14 +200,15 @@ export const cases: ClaimCase[] = [
     insurer: "Mapfre Perú",
     insured: "Distribuciones Santa Rosa",
     broker: "Willis Towers Watson",
-    riskType: "Transporte",
+    riskType: "Importaciones / Exportaciones",
+    subCategory: "Tránsito internacional",
     claimedAmount: 211900,
     adjuster: "Enrique Custodio",
     status: "Completado",
     lastUpdate: "23 Jun 2026",
     policyNumber: "TR-120945",
     contact: "gerencia@dsantarosa.pe · +51 933 818 774",
-    description: "Diferencia entre monto facturado y carga reportada como dañada en destino.",
+    description: "Daño reportado durante tránsito internacional de mercancía importada.",
     documents: [
       { name: "Denuncia policial", status: "Recibido" },
       { name: "Documentos del chofer/camión", status: "Recibido" },
@@ -119,6 +223,7 @@ export const cases: ClaimCase[] = [
     insured: "Frío Cargo Perú",
     broker: "Corredores Unidos",
     riskType: "Transporte",
+    subCategory: "Transportista contratado",
     claimedAmount: 93500,
     adjuster: "Carlos Caro",
     status: "Registrado",
@@ -139,7 +244,8 @@ export const cases: ClaimCase[] = [
     insurer: "Chubb Perú",
     insured: "Importadora Altamar",
     broker: "Risk Partners",
-    riskType: "Transporte",
+    riskType: "Importaciones / Exportaciones",
+    subCategory: "Tramo terrestre post importación",
     claimedAmount: 158700,
     adjuster: "Fabricio Sotelo",
     status: "Completado",
