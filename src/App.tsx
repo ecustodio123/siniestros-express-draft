@@ -25,8 +25,12 @@ import {
 import { useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { CaseStatus, ClaimCase, cases, featuredCase } from "./data/mockCases";
+import { analizarSiniestro, estadoDeVeredicto, guardarResultado, leerResultado } from "./api";
+import type { CamposExpediente, PasoTraza, RespuestaAnalisis, Veredicto } from "./api";
 
 type Screen = "login" | "dashboard" | "new" | "confirmation" | "detail" | "report";
+// Se mantiene para ConfirmationPage y DetailPage (Task 9 los reemplaza por
+// `Veredicto`); NewCasePage ya no lo usa.
 type AnalysisResult = "faltante" | "informe";
 type SortDirection = "asc" | "desc";
 type SortKey = keyof Pick<
@@ -75,11 +79,13 @@ function Button({
   onClick,
   variant = "primary",
   icon,
+  disabled = false,
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   variant?: "primary" | "secondary" | "ghost" | "danger";
   icon?: React.ReactNode;
+  disabled?: boolean;
 }) {
   const styles = {
     primary: "bg-slate-950 text-white shadow-sm shadow-slate-950/20 hover:bg-brand-700",
@@ -90,9 +96,10 @@ function Button({
 
   return (
     <button
-      className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition ${styles[variant]}`}
+      className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60 ${styles[variant]}`}
       onClick={onClick}
       type="button"
+      disabled={disabled}
     >
       {icon}
       {children}
@@ -496,36 +503,78 @@ function DashboardPage({ go }: { go: (screen: Screen) => void }) {
   );
 }
 
+const CAMPOS_EXPEDIENTE: { clave: keyof CamposExpediente; etiqueta: string }[] = [
+  { clave: "aseguradora", etiqueta: "Nombre de la aseguradora" },
+  { clave: "asegurado", etiqueta: "Nombre del asegurado" },
+  { clave: "corredor", etiqueta: "Nombre del corredor de seguros" },
+  { clave: "contacto", etiqueta: "Datos de contacto del asegurado" },
+  { clave: "numero_poliza", etiqueta: "Número de póliza" },
+  { clave: "monto_reclamado", etiqueta: "Monto reclamado" },
+];
+
+// La Póliza es obligatoria: sin ella el extractor no puede obtener vigencia,
+// prima, riesgos cubiertos ni suma asegurada — campos núcleo del `case` en
+// `ingestion/schema.py`. Sin este documento, `validar_case` deriva el caso a
+// ESCALADO por extracción incompleta.
+const DOCUMENTOS_REQUERIDOS = [
+  "Póliza",
+  "Denuncia Policial",
+  "Documentos del chofer o camión",
+  "Guías de remisión",
+  "Facturas",
+];
+
 function NewCasePage({ go }: { go: (screen: Screen) => void }) {
-  const [attached, setAttached] = useState<Record<string, boolean>>({});
+  const [campos, setCampos] = useState<CamposExpediente>({
+    aseguradora: "",
+    asegurado: "",
+    corredor: "",
+    contacto: "",
+    numero_poliza: "",
+    monto_reclamado: "",
+    descripcion: "",
+  });
+  const [archivosPorDocumento, setArchivosPorDocumento] = useState<Record<string, File[]>>({});
+  const [analizando, setAnalizando] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
-  const docs = ["Denuncia Policial", "Documentos del chofer o camión", "Guías de remisión", "Facturas"];
-  const sendToAnalysis = () => {
-    const result: AnalysisResult = Math.random() < 0.5 ? "faltante" : "informe";
-    navigate(`/siniestros/confirmacion?resultado=${result}`);
+
+  const todosLosArchivos = Object.values(archivosPorDocumento).flat();
+  const faltaPoliza = !(archivosPorDocumento["Póliza"]?.length);
+
+  const enviarAAnalisis = async () => {
+    setError(null);
+    setAnalizando(true);
+    try {
+      const respuesta = await analizarSiniestro(campos, todosLosArchivos);
+      guardarResultado(respuesta);
+      navigate("/siniestros/confirmacion");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Fallo inesperado al analizar el expediente.");
+    } finally {
+      setAnalizando(false);
+    }
   };
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold text-slate-950">Nuevo Siniestro</h1>
-        <p className="mt-1 text-slate-500">Registro visual de expediente para análisis documental simulado.</p>
+        <p className="mt-1 text-slate-500">Los documentos se analizan con IA y se evalúan contra las reglas de la póliza.</p>
       </div>
       <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
         <Card className="p-6">
           <h2 className="text-lg font-bold text-slate-950">Datos del expediente</h2>
           <div className="mt-5 grid gap-4 md:grid-cols-2">
-            {[
-              "Nombre de la aseguradora",
-              "Nombre del asegurado",
-              "Nombre del corredor de seguros",
-              "Datos de contacto del asegurado",
-              "Número de póliza",
-              "Monto reclamado",
-            ].map((label) => (
-              <label key={label} className="block">
-                <span className="text-sm font-semibold text-slate-700">{label}</span>
-                <input className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-3 outline-none transition placeholder:text-slate-400 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-blue-100" placeholder={label} />
+            {CAMPOS_EXPEDIENTE.map(({ clave, etiqueta }) => (
+              <label key={clave} className="block">
+                <span className="text-sm font-semibold text-slate-700">{etiqueta}</span>
+                <input
+                  value={campos[clave]}
+                  onChange={(e) => setCampos((prev) => ({ ...prev, [clave]: e.target.value }))}
+                  className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-3 outline-none transition placeholder:text-slate-400 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-blue-100"
+                  placeholder={etiqueta}
+                />
               </label>
             ))}
             <label className="block">
@@ -534,40 +583,76 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
             </label>
             <label className="block md:col-span-2">
               <span className="text-sm font-semibold text-slate-700">Descripción del siniestro</span>
-              <textarea className="mt-2 min-h-32 w-full rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-3 outline-none transition placeholder:text-slate-400 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-blue-100" placeholder="Describa brevemente el incidente, ruta, mercadería y daños reportados." />
+              <textarea
+                value={campos.descripcion}
+                onChange={(e) => setCampos((prev) => ({ ...prev, descripcion: e.target.value }))}
+                className="mt-2 min-h-32 w-full rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-3 outline-none transition placeholder:text-slate-400 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-blue-100"
+                placeholder="Describa brevemente el incidente, ruta, mercadería y daños reportados."
+              />
             </label>
           </div>
         </Card>
 
         <Card className="p-6">
           <h2 className="text-lg font-bold text-slate-950">Documentos requeridos</h2>
-          <p className="mt-1 text-sm text-slate-500">Las tarjetas simulan la selección de archivos; no se realiza carga real.</p>
+          <p className="mt-1 text-sm text-slate-500">PDF o imágenes. La póliza es indispensable para evaluar la cobertura.</p>
           <div className="mt-5 grid gap-3">
-            {docs.map((doc) => (
-              <div key={doc} className="rounded-lg border border-slate-200 bg-slate-50/60 p-4 transition hover:border-brand-200 hover:bg-white">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-start gap-3">
-                    <div className="rounded-lg bg-white p-2 text-slate-600 shadow-sm ring-1 ring-slate-200">
-                      <Upload className="h-5 w-5" />
+            {DOCUMENTOS_REQUERIDOS.map((documento) => {
+              const adjuntos = archivosPorDocumento[documento] ?? [];
+              return (
+                <div key={documento} className="rounded-lg border border-slate-200 bg-slate-50/60 p-4 transition hover:border-brand-200 hover:bg-white">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <div className="rounded-lg bg-white p-2 text-slate-600 shadow-sm ring-1 ring-slate-200">
+                        <Upload className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <p className="font-semibold text-slate-900">{documento}</p>
+                        <p className={`mt-1 text-sm font-medium ${adjuntos.length ? "text-emerald-700" : "text-amber-700"}`}>
+                          {adjuntos.length ? adjuntos.map((archivo) => archivo.name).join(", ") : "Pendiente"}
+                        </p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="font-semibold text-slate-900">{doc}</p>
-                      <p className={`mt-1 text-sm font-medium ${attached[doc] ? "text-emerald-700" : "text-amber-700"}`}>
-                        {attached[doc] ? "Adjunto simulado" : "Pendiente"}
-                      </p>
-                    </div>
+                    <label className="shrink-0 cursor-pointer rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50">
+                      Seleccionar
+                      <input
+                        type="file"
+                        multiple
+                        accept=".pdf,.jpg,.jpeg,.png,.webp"
+                        className="hidden"
+                        onChange={(e) =>
+                          setArchivosPorDocumento((prev) => ({ ...prev, [documento]: Array.from(e.target.files ?? []) }))
+                        }
+                      />
+                    </label>
                   </div>
-                  <Button variant="secondary" onClick={() => setAttached((prev) => ({ ...prev, [doc]: true }))}>Seleccionar archivo</Button>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
+          {faltaPoliza && (
+            <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800">
+              Sin la póliza no se puede evaluar la cobertura: el expediente se derivaría a revisión humana.
+            </p>
+          )}
         </Card>
       </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-800">
+          {error}
+        </div>
+      )}
+
       <div className="flex flex-wrap justify-end gap-3">
         <Button variant="ghost" onClick={() => go("dashboard")}>Cancelar</Button>
-        <Button variant="secondary">Guardar borrador</Button>
-        <Button onClick={sendToAnalysis} icon={<Bot className="h-4 w-4" />}>Enviar a análisis IA</Button>
+        <Button
+          onClick={enviarAAnalisis}
+          disabled={analizando || todosLosArchivos.length === 0}
+          icon={analizando ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
+        >
+          {analizando ? "Analizando expediente…" : "Enviar a análisis IA"}
+        </Button>
       </div>
     </div>
   );
