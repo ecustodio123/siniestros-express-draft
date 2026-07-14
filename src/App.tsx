@@ -7,8 +7,10 @@ import {
   ChevronRight,
   ClipboardCheck,
   Clock3,
+  EyeOff,
   FileCheck2,
   FileText,
+  FileWarning,
   FolderOpen,
   Info,
   LayoutDashboard,
@@ -1211,6 +1213,80 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
                   Recordatorios: {resultado.recordatorios.map((r) => `${r.dias}d (${r.fecha ?? "fecha base no disponible"})`).join(" · ")}
                 </p>
               )}
+            </Card>
+          )}
+
+          {/* Qué le pasó a lo que SÍ se subió. Va pegada a "Documentos faltantes"
+              a propósito: es justo ahí donde el ajustador se pregunta qué le
+              falta, y donde antes se llevaba la respuesta equivocada — salía a
+              buscar un documento que ya tenía, porque un papel ilegible y un
+              papel ausente se veían igual. Las tres se resuelven distinto, así
+              que se presentan distinto. */}
+          {(!!resultado.documentos_ilegibles.length ||
+            !!resultado.documentos_ignorados.length ||
+            !!resultado.campos_descartados.length) && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Documentos que sí llegaron</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Están en el expediente, pero su contenido no llegó entero al motor.
+              </p>
+
+              <ul className="mt-4 space-y-2">
+                {resultado.documentos_ilegibles.map((d) => (
+                  <li
+                    key={`ilegible-${d.documentos.join("|")}`}
+                    className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
+                  >
+                    <p className="flex items-center gap-3 font-semibold">
+                      <FileWarning className="h-4 w-4 shrink-0" />
+                      {d.documentos.join(", ")} — no se pudo leer
+                    </p>
+                    {/* El motivo es la explicación LITERAL del modelo, no una
+                        nuestra: es lo que le dice al ajustador si vale la pena
+                        pedir un mejor escaneo o si el papel está en blanco. */}
+                    <p className="mt-1 pl-7 text-xs text-amber-800">{d.motivo}</p>
+                    <p className="mt-1 pl-7 text-xs font-medium text-amber-700">
+                      Vuelva a subirlo con mejor calidad de escaneo.
+                    </p>
+                  </li>
+                ))}
+
+                {resultado.documentos_ignorados.map((nombre) => (
+                  <li
+                    key={`ignorado-${nombre}`}
+                    className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600"
+                  >
+                    <p className="flex items-center gap-3 font-semibold text-slate-800">
+                      <EyeOff className="h-4 w-4 shrink-0" />
+                      {nombre} — no se leyó
+                    </p>
+                    <p className="mt-1 pl-7 text-xs text-slate-500">
+                      No se reconoció como un documento del expediente, así que no pesó en el
+                      veredicto. Si sí lo es, avísenos.
+                    </p>
+                  </li>
+                ))}
+
+                {resultado.campos_descartados.map((d) => (
+                  <li
+                    key={`descartado-${d.documentos.join("|")}`}
+                    className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900"
+                  >
+                    <p className="flex items-center gap-3 font-semibold">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      {d.documentos.join(", ")} — se leyó, pero no pudimos usarlo
+                    </p>
+                    {/* Este NO se arregla pidiendo documentos: el dato estaba y el
+                        fallo es nuestro. Decirle al ajustador que "falta un campo"
+                        sería mandarlo a una gestión inútil. */}
+                    <p className="mt-1 pl-7 text-xs text-rose-800">
+                      El documento se leyó correctamente, pero parte de su contenido no llegó al
+                      motor. No hace falta que envíe nada: es un problema nuestro. Contacte a
+                      soporte.
+                    </p>
+                  </li>
+                ))}
+              </ul>
             </Card>
           )}
 

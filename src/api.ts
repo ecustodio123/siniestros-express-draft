@@ -211,6 +211,27 @@ export type DocumentoCondicional = {
   condicion: string;
 };
 
+/** Un documento que SÍ se subió y del que NO se pudo extraer nada — un escaneo
+ *  malo, típicamente. `motivo` es la explicación LITERAL del modelo, no una
+ *  nuestra: "no se pudo leer" es información, no ausencia de información. Sin
+ *  esto, el ajustador lee "falta la vigencia" y sale a pedir una póliza que ya
+ *  está en el expediente. */
+export type DocumentoIlegible = {
+  documentos: string[];
+  tipo: string | null;
+  motivo: string;
+};
+
+/** Un documento que se leyó BIEN y cuyos campos NO llegaron al motor: el modelo
+ *  los colgó de una raíz que el `case` no tiene (`raices`). Es el caso más
+ *  traicionero de los tres, porque el dato SÍ estaba y el fallo es NUESTRO — no
+ *  se arregla pidiendo documentos. Ver `ingestion/campos_por_documento.py::RAICES_CASE`. */
+export type CamposDescartados = {
+  documentos: string[];
+  tipo: string | null;
+  raices: string[];
+};
+
 /** Forma exacta de la respuesta de `POST /api/siniestros`. */
 export type RespuestaAnalisis = {
   caso_id: string;
@@ -236,6 +257,18 @@ export type RespuestaAnalisis = {
   // etiquetas listas para pintar: siempre traducir con `etiquetas_documentos`
   // antes de mostrarlos (ver `api/esquema.py::construir_respuesta`).
   faltantes: string[];
+  // `faltantes` dice qué documentos NO llegaron. Estas tres dicen qué le pasó a
+  // lo que SÍ llegó, y son tres cosas DISTINTAS que antes se veían igual —un
+  // "falta poliza.vigencia_inicio" que mandaba al ajustador a buscar un papel
+  // que ya tenía en la mano—. Cada una se resuelve de una manera:
+  //   - ilegible   -> pedir un escaneo mejor
+  //   - ignorado   -> nada (era ruido), pero hay que decirlo
+  //   - descartado -> soporte: es un bug NUESTRO y el dato SÍ estaba
+  // Aquí van los NOMBRES de archivo tal cual los subió el usuario (no ids de
+  // catálogo), así que se pintan directos: no pasan por `etiquetas_documentos`.
+  documentos_ilegibles: DocumentoIlegible[];
+  documentos_ignorados: string[];
+  campos_descartados: CamposDescartados[];
   condicionales: DocumentoCondicional[];
   etiquetas_documentos: Record<string, string>;
   datos_formulario: CamposExpediente;
