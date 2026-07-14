@@ -10,6 +10,7 @@ import {
   FileCheck2,
   FileText,
   FolderOpen,
+  Info,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -24,7 +25,7 @@ import { useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { CaseSubCategory, CaseStatus, ClaimCase, cases, claimTypeOptions, featuredCase } from "./data/mockCases";
 import { analizarSiniestro, estadoDeVeredicto, guardarResultado, leerResultado } from "./api";
-import type { CamposExpediente, Confianza, DatosOperador, PasoTraza, PreAnalisisIA, RespuestaAnalisis, Veredicto, ValorJson } from "./api";
+import type { CamposExpediente, Confianza, DatosOperador, PasoTraza, PreAnalisisIA, RespuestaAnalisis, TramoCuantia, Veredicto, ValorJson } from "./api";
 
 type Screen = "login" | "dashboard" | "new" | "confirmation" | "detail" | "report";
 type SortDirection = "asc" | "desc";
@@ -859,6 +860,7 @@ const TITULO_VEREDICTO: Record<Veredicto, string> = {
   RECHAZO: "Expediente rechazado",
   OBSERVADO: "Faltan documentos obligatorios",
   ESCALADO: "Derivado a revisión del ajustador",
+  FUERA_DE_ALCANCE: "Fuera del alcance del producto Express",
 };
 
 const DETALLE_VEREDICTO: Record<Veredicto, string> = {
@@ -867,23 +869,33 @@ const DETALLE_VEREDICTO: Record<Veredicto, string> = {
   RECHAZO: "Una compuerta falló con evidencia. El informe cita el motivo y su fundamento legal.",
   OBSERVADO: "El expediente está incompleto. Se generaron recordatorios a 30, 60 y 180 días.",
   ESCALADO: "El motor no decide sin evidencia suficiente: el caso pasa al ajustador con pre-análisis.",
+  // Deliberadamente NO es un rechazo ni un problema: el reclamo supera el
+  // tope de cuantía del producto Express (US$ 10,000), pero el siniestro
+  // puede ser perfectamente válido y pagable. Se deriva al proceso de ajuste
+  // tradicional completo -no se le niega nada al asegurado-.
+  FUERA_DE_ALCANCE:
+    "El reclamo supera el tope de cuantía de este producto (US$ 10,000). No es un rechazo: el siniestro puede ser válido y pagable, y pasa al proceso de ajuste tradicional completo.",
 };
 
 // Categoría visual del veredicto (icono/color de ConfirmationPage): distingue
 // un rechazo (negativo) de una derivación u observación (atención), en vez de
-// tratarlos igual solo por no ser una aprobación.
-const CATEGORIA_VEREDICTO: Record<Veredicto, "positivo" | "negativo" | "atencion"> = {
+// tratarlos igual solo por no ser una aprobación. "informativo" es su propia
+// categoría -ni positiva ni negativa ni de atención-: FUERA_DE_ALCANCE no es
+// un problema del expediente, es que este producto no atiende el caso.
+const CATEGORIA_VEREDICTO: Record<Veredicto, "positivo" | "negativo" | "atencion" | "informativo"> = {
   APROBABLE: "positivo",
   APROBABLE_POR_SILENCIO: "positivo",
   RECHAZO: "negativo",
   OBSERVADO: "atencion",
   ESCALADO: "atencion",
+  FUERA_DE_ALCANCE: "informativo",
 };
 
-const ESTILO_CATEGORIA: Record<"positivo" | "negativo" | "atencion", string> = {
+const ESTILO_CATEGORIA: Record<"positivo" | "negativo" | "atencion" | "informativo", string> = {
   positivo: "bg-emerald-50 text-emerald-700",
   negativo: "bg-red-50 text-red-700",
   atencion: "bg-amber-50 text-amber-700",
+  informativo: "bg-slate-100 text-slate-700",
 };
 
 function EstadoVacio({
@@ -925,7 +937,14 @@ function ConfirmationPage({ go }: { go: (screen: Screen) => void }) {
   }
 
   const categoria = CATEGORIA_VEREDICTO[resultado.veredicto];
-  const Icono = categoria === "negativo" ? AlertCircle : categoria === "positivo" ? CheckCircle2 : AlertCircle;
+  const Icono =
+    categoria === "negativo"
+      ? AlertCircle
+      : categoria === "positivo"
+        ? CheckCircle2
+        : categoria === "informativo"
+          ? Info
+          : AlertCircle;
 
   return (
     <div className="mx-auto max-w-3xl pt-12">
@@ -959,6 +978,17 @@ const ESTILO_ESTADO_GATE: Record<string, string> = {
   INCONCLUSO: "bg-amber-50 text-amber-800 ring-amber-200",
   OBSERVADO: "bg-amber-50 text-amber-800 ring-amber-200",
   SILENCIO: "bg-blue-50 text-blue-800 ring-blue-200",
+  // Neutro -no rojo/ámbar-: el check G1.6 no encontró un problema con el
+  // expediente, solo determinó que el caso no le corresponde a este flujo.
+  FUERA_DE_ALCANCE: "bg-slate-100 text-slate-700 ring-slate-200",
+};
+
+// Honorario fijo del tramo comercial del producto Express (checks G1.7/G1.8,
+// engine/rules/transporte.yaml; ver `TramoCuantia` en api.ts): lo que cobra
+// la ajustadora por tramitar el caso, no la indemnización del asegurado.
+const HONORARIO_TRAMO: Record<TramoCuantia, string> = {
+  I: "Tramo I · honorario US$ 120 + IGV",
+  II: "Tramo II · honorario US$ 250 + IGV",
 };
 
 const ESTILO_CONFIANZA: Record<Confianza, string> = {
@@ -1095,6 +1125,14 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
     : indem.calculable
       ? formatUsd(indem.indemnizacion)
       : "No calculable con los datos disponibles";
+  // El tramo fija el honorario del SERVICIO de ajuste (lo que cobra la
+  // ajustadora), no la indemnización del asegurado -de ahí que se muestre
+  // aparte-. `null` no siempre significa FUERA_DE_ALCANCE: también puede ser
+  // que el motor derivó el caso antes de fijar el tramo (p.ej. pérdida
+  // valorizada ausente, check G1.9), así que el texto no asume una causa.
+  const tramoHonorario = resultado.tramo_cuantia
+    ? HONORARIO_TRAMO[resultado.tramo_cuantia]
+    : "No determinado";
   const ultimaCompuerta = resultado.traza.length ? resultado.traza[resultado.traza.length - 1] : undefined;
 
   return (
@@ -1126,6 +1164,7 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
                 ["Veredicto", resultado.veredicto],
                 ["Escenario", resultado.clasificacion?.escenario ?? "—"],
                 ["Confianza de clasificación", resultado.clasificacion?.confianza ?? "—"],
+                ["Tramo del servicio", tramoHonorario],
                 ["Indemnización", montoIndemnizacion],
               ].map(([label, value]) => (
                 <div key={label} className="flex justify-between gap-5 border-b border-slate-100 pb-3">

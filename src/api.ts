@@ -9,13 +9,33 @@
  */
 import type { CaseStatus } from "./data/mockCases";
 
-/** Los cinco veredictos que puede emitir el motor de reglas. */
+/** Los seis veredictos que puede emitir el motor de reglas.
+ *
+ *  `FUERA_DE_ALCANCE` (checks G1.6/G1.9, engine/rules/transporte.yaml) NO es
+ *  un rechazo: el reclamo supera el tope de cuantía del producto Express
+ *  (US$ 10,000), pero el siniestro puede ser perfectamente válido y
+ *  pagable -no hay evidencia en contra-. Simplemente no le corresponde a
+ *  ESTE flujo automatizado, y se deriva al proceso de ajuste tradicional
+ *  completo. La UI nunca debe presentarlo como un problema del asegurado. */
 export type Veredicto =
   | "APROBABLE"
   | "APROBABLE_POR_SILENCIO"
   | "RECHAZO"
   | "ESCALADO"
-  | "OBSERVADO";
+  | "OBSERVADO"
+  | "FUERA_DE_ALCANCE";
+
+/** Tramo comercial del producto Express (checks G1.7/G1.8,
+ *  engine/rules/transporte.yaml): fija el HONORARIO del servicio de ajuste
+ *  -lo que se le cobra a la aseguradora por tramitar el caso-, no la
+ *  indemnización que se le paga al asegurado. Se calcula sobre la pérdida
+ *  valorizada/reclamada (`siniestro.perdida_usd`), nunca sobre la
+ *  indemnización final (que depende de infraseguro/deducible, resueltos
+ *  después).
+ *    - "I":  hasta US$ 5,000 -> honorario fijo US$ 120 + IGV.
+ *    - "II": US$ 5,000.01 a US$ 10,000 -> honorario fijo US$ 250 + IGV.
+ *  Ver `RespuestaAnalisis.tramo_cuantia` para cuándo puede ser `null`. */
+export type TramoCuantia = "I" | "II";
 
 /** Nivel de confianza, tal como lo reportan el clasificador de escenario y la
  *  capa IA de lectura. Es un `str` libre en Python, pero documentado y en la
@@ -60,13 +80,17 @@ export type PreAnalisisIA = {
  * vienen siempre juntas. `lectura_ia` solo aparece en el último paso de un
  * caso ESCALADO, cuando la capa IA de lectura ya anotó su pre-análisis ahí
  * (además de en `pre_analisis_ia`, a nivel de la respuesta completa).
+ *
+ * `FUERA_DE_ALCANCE` puede ser el estado del último paso (check G1.6): es
+ * tan decisivo como FAIL/OBSERVADO/SILENCIO (corta la cascada, ver DECISIVO
+ * en `engine/runner.py`) y trae `check`/`motivo`/`evidencia` igual que ellos.
  */
 export type PasoTraza =
   | { gate: string; nombre: string; estado: "PASS" }
   | {
       gate: string;
       nombre: string;
-      estado: "FAIL" | "OBSERVADO" | "SILENCIO" | "INCONCLUSO";
+      estado: "FAIL" | "OBSERVADO" | "SILENCIO" | "INCONCLUSO" | "FUERA_DE_ALCANCE";
       check: string;
       motivo: string;
       evidencia: Evidencia[];
@@ -99,9 +123,17 @@ export type DiscrepanciaEscenario = {
 
 /** Cálculo de indemnización con infraseguro (Motor B). `null` si el
  *  veredicto no es APROBABLE/APROBABLE_POR_SILENCIO o si el motor no llegó
- *  a correr (caso derivado antes de decidir). */
+ *  a correr (caso derivado antes de decidir).
+ *
+ *  `moneda` es la de la póliza sobre la que se intentó el cálculo (el motor
+ *  solo calcula en USD): si `calculable` es `false` por moneda no soportada
+ *  o ausente, igual la cita (o `null` si la póliza no la consigna) para que
+ *  la UI explique por qué no se pudo calcular. Verificado contra
+ *  `informe/indemnizacion.py::Indemnizacion` -campo ausente en una versión
+ *  previa de este tipo-. */
 export type Indemnizacion = {
   calculable: boolean;
+  moneda: string | null;
   perdida_bruta: number | null;
   suma_asegurada: number | null;
   valor_real: number | null;
@@ -183,6 +215,11 @@ export type DocumentoCondicional = {
 export type RespuestaAnalisis = {
   caso_id: string;
   veredicto: Veredicto;
+  // Tramo comercial del producto Express (ver `TramoCuantia`): fija el
+  // honorario del servicio de ajuste, no un dato interno. `null` si el motor
+  // no llegó a fijarlo (p.ej. veredicto FUERA_DE_ALCANCE, o pérdida
+  // valorizada ausente -check G1.9-).
+  tramo_cuantia: TramoCuantia | null;
   motivo: string | null;
   flags: string[];
   traza: PasoTraza[];
@@ -259,6 +296,12 @@ export function estadoDeVeredicto(veredicto: Veredicto): CaseStatus {
       return "Información faltante";
     case "RECHAZO":
     case "ESCALADO":
+    // FUERA_DE_ALCANCE reutiliza el mismo estado neutro que RECHAZO/ESCALADO
+    // en esta lista genérica -no existe (todavía) un estado de tablero
+    // dedicado-, pero NUNCA debe leerse como un rechazo: el detalle del
+    // expediente es quien explica el matiz (ver TITULO_VEREDICTO/
+    // DETALLE_VEREDICTO/CATEGORIA_VEREDICTO en App.tsx).
+    case "FUERA_DE_ALCANCE":
       return "Registrado";
   }
 }
