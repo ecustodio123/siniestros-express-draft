@@ -12,6 +12,7 @@ import {
   FileText,
   FolderOpen,
   LayoutDashboard,
+  Loader2,
   LogOut,
   Menu,
   Plus,
@@ -22,11 +23,11 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { CaseStatus, ClaimCase, cases, featuredCase } from "./data/mockCases";
+import { CaseStatus, ClaimCase, cases, claimTypeOptions, featuredCase } from "./data/mockCases";
 
-type Screen = "login" | "dashboard" | "new" | "confirmation" | "detail" | "report";
+type Screen = "login" | "dashboard" | "new" | "analyzing" | "confirmation" | "detail" | "report";
 type AnalysisResult = "faltante" | "informe";
 type SortDirection = "asc" | "desc";
 type SortKey = keyof Pick<
@@ -38,6 +39,7 @@ const routeByScreen: Record<Screen, string> = {
   login: "/login",
   dashboard: "/dashboard",
   new: "/siniestros/nuevo",
+  analyzing: "/siniestros/analizando",
   confirmation: "/siniestros/confirmacion",
   detail: `/siniestros/${featuredCase.id}`,
   report: `/siniestros/${cases[0].id}/informe`,
@@ -501,12 +503,77 @@ function DashboardPage({ go }: { go: (screen: Screen) => void }) {
 
 function NewCasePage({ go }: { go: (screen: Screen) => void }) {
   const [attached, setAttached] = useState<Record<string, boolean>>({});
+  const [selectedClaimType, setSelectedClaimType] = useState(claimTypeOptions[0].subCategory);
+  const [isChoosingClaimType, setIsChoosingClaimType] = useState(true);
   const navigate = useNavigate();
-  const docs = ["Denuncia Policial", "Documentos del chofer o camión", "Guías de remisión", "Facturas"];
+  const selectedClaimTypeOption =
+    claimTypeOptions.find((option) => option.subCategory === selectedClaimType) ?? claimTypeOptions[0];
+  const docs = selectedClaimTypeOption.requiredDocuments;
+  const selectedClaimTypeLabel = `${selectedClaimTypeOption.riskType} - ${selectedClaimTypeOption.subCategory}`;
+  const handleClaimTypeChange = (subCategory: string) => {
+    setSelectedClaimType(subCategory as typeof selectedClaimType);
+    setAttached({});
+  };
+  const selectClaimType = (subCategory: string) => {
+    handleClaimTypeChange(subCategory);
+    setIsChoosingClaimType(false);
+  };
   const sendToAnalysis = () => {
     const result: AnalysisResult = Math.random() < 0.5 ? "faltante" : "informe";
-    navigate(`/siniestros/confirmacion?resultado=${result}`);
+    navigate(`/siniestros/analizando?resultado=${result}`);
   };
+
+  if (isChoosingClaimType) {
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-col justify-between gap-4 rounded-lg border border-slate-200/80 bg-white px-6 py-5 shadow-[0_18px_45px_rgba(15,23,42,0.05)] sm:flex-row sm:items-center">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-wide text-brand-700">Nuevo siniestro</p>
+            <h1 className="mt-1 text-3xl font-bold text-slate-950">Selecciona el tipo de siniestro</h1>
+            <p className="mt-2 text-slate-500">La documentación requerida se ajustará automáticamente según la subcategoría elegida.</p>
+          </div>
+          <Button variant="secondary" onClick={() => go("dashboard")}>Cancelar</Button>
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-2">
+          {claimTypeOptions.map((option) => (
+            <button
+              key={option.subCategory}
+              className="group rounded-lg border border-slate-200 bg-white p-5 text-left shadow-[0_18px_45px_rgba(15,23,42,0.06)] transition hover:border-brand-200 hover:shadow-[0_22px_55px_rgba(37,99,235,0.12)]"
+              onClick={() => selectClaimType(option.subCategory)}
+              type="button"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wide text-slate-400">{option.riskType}</p>
+                  <h2 className="mt-2 text-xl font-bold text-slate-950">{option.subCategory}</h2>
+                  <p className="mt-3 text-sm leading-6 text-slate-500">
+                    {option.requiredDocuments.length} documentos requeridos para iniciar la revisión documental.
+                  </p>
+                </div>
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-slate-50 text-brand-700 ring-1 ring-slate-200 transition group-hover:bg-brand-700 group-hover:text-white">
+                  <FileText className="h-5 w-5" />
+                </div>
+              </div>
+              <div className="mt-5 flex flex-wrap gap-2">
+                {option.requiredDocuments.slice(0, 3).map((doc) => (
+                  <span key={doc} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+                    {doc}
+                  </span>
+                ))}
+                {option.requiredDocuments.length > 3 && (
+                  <span className="rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700">
+                    +{option.requiredDocuments.length - 3} más
+                  </span>
+                )}
+              </div>
+              <div className="mt-5 text-sm font-bold text-brand-700">Seleccionar y continuar</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -532,8 +599,25 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
               </label>
             ))}
             <label className="block">
+              <span className="text-sm font-semibold text-slate-700">Tipo de siniestro</span>
+              <div className="mt-2 rounded-lg border border-brand-100 bg-brand-50 p-4">
+                <p className="font-bold text-brand-900">{selectedClaimTypeLabel}</p>
+                <button
+                  className="mt-2 text-sm font-bold text-brand-700 hover:text-brand-900"
+                  onClick={() => setIsChoosingClaimType(true)}
+                  type="button"
+                >
+                  Cambiar tipo
+                </button>
+              </div>
+            </label>
+            <label className="block">
               <span className="text-sm font-semibold text-slate-700">Tipo de riesgo</span>
-              <input className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-3 text-slate-600" value="Transporte" readOnly />
+              <input className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-3 text-slate-600" value={selectedClaimTypeOption.riskType} readOnly />
+            </label>
+            <label className="block md:col-span-2">
+              <span className="text-sm font-semibold text-slate-700">Subcategoría</span>
+              <input className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-3 text-slate-600" value={selectedClaimTypeOption.subCategory} readOnly />
             </label>
             <label className="block md:col-span-2">
               <span className="text-sm font-semibold text-slate-700">Descripción del siniestro</span>
@@ -544,7 +628,9 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
 
         <Card className="p-6">
           <h2 className="text-lg font-bold text-slate-950">Documentos requeridos</h2>
-          <p className="mt-1 text-sm text-slate-500">Las tarjetas simulan la selección de archivos; no se realiza carga real.</p>
+          <p className="mt-1 text-sm text-slate-500">
+            Requisitos para {selectedClaimTypeLabel}. Las tarjetas simulan la selección de archivos; no se realiza carga real.
+          </p>
           <div className="mt-5 grid gap-3">
             {docs.map((doc) => (
               <div key={doc} className="rounded-lg border border-slate-200 bg-slate-50/60 p-4 transition hover:border-brand-200 hover:bg-white">
@@ -572,6 +658,124 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
         <Button variant="secondary">Guardar borrador</Button>
         <Button onClick={sendToAnalysis} icon={<Bot className="h-4 w-4" />}>Enviar a análisis IA</Button>
       </div>
+    </div>
+  );
+}
+
+function AnalyzingPage({ go }: { go: (screen: Screen) => void }) {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const result: AnalysisResult = searchParams.get("resultado") === "informe" ? "informe" : "faltante";
+  const [progress, setProgress] = useState(8);
+  const analysisSteps = [
+    "Leyendo datos generales del expediente",
+    "Validando documentos requeridos por subcategoría",
+    "Identificando observaciones y próximos pasos",
+    "Preparando resultado del análisis",
+  ];
+
+  useEffect(() => {
+    const increments = [16, 27, 41, 56, 68, 79, 88, 96, 100];
+    let index = 0;
+
+    const interval = window.setInterval(() => {
+      setProgress(increments[index] ?? 100);
+      index += 1;
+
+      if (index > increments.length) {
+        window.clearInterval(interval);
+        navigate(`/siniestros/confirmacion?resultado=${result}`, { replace: true });
+      }
+    }, 360);
+
+    return () => window.clearInterval(interval);
+  }, [navigate, result]);
+
+  return (
+    <div className="mx-auto flex max-w-4xl items-center justify-center py-12 lg:min-h-[calc(100vh-160px)]">
+      <Card className="w-full overflow-hidden">
+        <div className="grid lg:grid-cols-[0.9fr_1.1fr]">
+          <section className="flex flex-col justify-between bg-slate-950 p-8 text-white">
+            <div>
+              <div className="flex h-14 w-14 items-center justify-center rounded-lg bg-white/10 ring-1 ring-white/15">
+                <Bot className="h-7 w-7 text-violet-200" />
+              </div>
+              <p className="mt-8 text-xs font-bold uppercase tracking-wide text-violet-200">Asistente IA documental</p>
+              <h1 className="mt-3 text-3xl font-bold leading-tight">Generando análisis del expediente</h1>
+              <p className="mt-4 leading-7 text-slate-300">
+                Estamos simulando la revisión documental, validación de requisitos y generación preliminar del resultado del siniestro.
+              </p>
+            </div>
+            <div className="mt-10 text-sm text-slate-400">Caso simulado SE-2026-007</div>
+          </section>
+
+          <section className="p-8">
+            <div className="flex items-center gap-4">
+              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-violet-50 text-violet-700 ring-1 ring-violet-100">
+                <Loader2 className="h-8 w-8 animate-spin" />
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold text-slate-950">Generando informe IA</h2>
+                <p className="mt-1 text-sm text-slate-500">Esto es una simulación visual para la demo comercial.</p>
+              </div>
+            </div>
+
+            <div className="mt-8 space-y-4">
+              {analysisSteps.map((step, index) => {
+                const stepThreshold = (index + 1) * 25;
+                const isComplete = progress >= stepThreshold;
+                const isActive = progress >= index * 25 && progress < stepThreshold;
+
+                return (
+                <div
+                  key={step}
+                  className={`flex items-center gap-3 rounded-lg border p-4 transition ${
+                    isComplete
+                      ? "border-emerald-200 bg-emerald-50"
+                      : isActive
+                        ? "border-brand-200 bg-brand-50"
+                        : "border-slate-200 bg-slate-50/70"
+                  }`}
+                >
+                  <div
+                    className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ring-1 ${
+                      isComplete
+                        ? "bg-emerald-600 text-white ring-emerald-600"
+                        : isActive
+                          ? "bg-brand-700 text-white ring-brand-700"
+                          : "bg-white text-brand-700 ring-slate-200"
+                    }`}
+                  >
+                    {isComplete ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
+                  </div>
+                  <p className="text-sm font-semibold text-slate-700">{step}</p>
+                </div>
+                );
+              })}
+            </div>
+
+            <div className="mt-8">
+              <div className="mb-2 flex items-center justify-between text-xs font-bold uppercase tracking-wide text-slate-500">
+                <span>Progreso del análisis IA</span>
+                <span>{progress}%</span>
+              </div>
+              <div className="overflow-hidden rounded-full bg-slate-100 ring-1 ring-slate-200">
+                <div
+                  className="h-2.5 rounded-full bg-brand-700 transition-all duration-300 ease-out"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="mt-8 flex flex-wrap gap-3">
+              <Button variant="secondary" onClick={() => go("new")}>Volver al registro</Button>
+              <Button variant="ghost" onClick={() => navigate(`/siniestros/confirmacion?resultado=${result}`, { replace: true })}>
+                Saltar simulación
+              </Button>
+            </div>
+          </section>
+        </div>
+      </Card>
     </div>
   );
 }
@@ -849,6 +1053,15 @@ function NewCaseRoute() {
   );
 }
 
+function AnalyzingRoute() {
+  const go = useScreenNavigation();
+  return (
+    <AppShell screen="analyzing" go={go}>
+      <AnalyzingPage go={go} />
+    </AppShell>
+  );
+}
+
 function ConfirmationRoute() {
   const go = useScreenNavigation();
   return (
@@ -884,6 +1097,7 @@ export default function App() {
         <Route path="/login" element={<LoginRoute />} />
         <Route path="/dashboard" element={<DashboardRoute />} />
         <Route path="/siniestros/nuevo" element={<NewCaseRoute />} />
+        <Route path="/siniestros/analizando" element={<AnalyzingRoute />} />
         <Route path="/siniestros/confirmacion" element={<ConfirmationRoute />} />
         <Route path="/siniestros/:caseId" element={<DetailRoute />} />
         <Route path="/siniestros/:caseId/informe" element={<ReportRoute />} />

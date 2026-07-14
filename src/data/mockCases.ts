@@ -18,6 +18,76 @@ export type CaseDocument = {
   status: DocumentStatus;
 };
 
+export type ClaimTypeOption = {
+  riskType: RiskType;
+  subCategory: CaseSubCategory;
+  requiredDocuments: string[];
+};
+
+export const claimTypeOptions: ClaimTypeOption[] = [
+  {
+    riskType: "Transporte",
+    subCategory: "Flota propia",
+    requiredDocuments: [
+      "Denuncia Policial",
+      "Proforma Valorizada de la Pérdida",
+      "Factura comercial",
+      "Guía de Remisión",
+      "Declaración del chofer",
+      "Acta de Salvamento",
+    ],
+  },
+  {
+    riskType: "Transporte",
+    subCategory: "Transportista contratado",
+    requiredDocuments: [
+      "Denuncia Policial",
+      "Proforma Valorizada de la Pérdida",
+      "Factura comercial",
+      "Guía de Remisión",
+      "Declaración del chofer",
+      "Carta de Reclamo al transportista",
+      "Acta de Salvamento",
+    ],
+  },
+  {
+    riskType: "Transporte",
+    subCategory: "Responsabilidad del transportista",
+    requiredDocuments: [
+      "Denuncia Policial",
+      "Proforma Valorizada de la Pérdida",
+      "Factura comercial",
+      "Guía de Remisión",
+      "Declaración del chofer",
+      "Carta de Reclamo del dueño de la mercadería",
+    ],
+  },
+  {
+    riskType: "Importaciones / Exportaciones",
+    subCategory: "Tránsito internacional",
+    requiredDocuments: [
+      "Conocimiento de embarque",
+      "Factura Comercial",
+      "Packing List",
+      "Valorización de la mercadería siniestrada",
+      "Volante de despacho",
+    ],
+  },
+  {
+    riskType: "Importaciones / Exportaciones",
+    subCategory: "Tramo terrestre post importación",
+    requiredDocuments: [
+      "Conocimiento de Embarque o guía aérea",
+      "Factura Comercial",
+      "Packing List",
+      "Aplicación de seguro",
+      "Denuncia policial",
+      "Guía de remisión transportista",
+      "Valorización de la mercadería siniestrada",
+    ],
+  },
+];
+
 export type ClaimCase = {
   id: string;
   insurer: string;
