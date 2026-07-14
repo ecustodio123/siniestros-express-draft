@@ -7,7 +7,6 @@ import {
   ChevronRight,
   ClipboardCheck,
   Clock3,
-  Download,
   FileCheck2,
   FileText,
   FolderOpen,
@@ -17,21 +16,17 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Send,
   ShieldCheck,
   Upload,
   X,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { CaseStatus, ClaimCase, cases, featuredCase } from "./data/mockCases";
 import { analizarSiniestro, estadoDeVeredicto, guardarResultado, leerResultado } from "./api";
-import type { CamposExpediente, PasoTraza, RespuestaAnalisis, Veredicto } from "./api";
+import type { CamposExpediente, Confianza, PasoTraza, PreAnalisisIA, RespuestaAnalisis, Veredicto, ValorJson } from "./api";
 
 type Screen = "login" | "dashboard" | "new" | "confirmation" | "detail" | "report";
-// Se mantiene para ConfirmationPage y DetailPage (Task 9 los reemplaza por
-// `Veredicto`); NewCasePage ya no lo usa.
-type AnalysisResult = "faltante" | "informe";
 type SortDirection = "asc" | "desc";
 type SortKey = keyof Pick<
   ClaimCase,
@@ -58,6 +53,13 @@ const formatMoney = (value: number) =>
     currency: "PEN",
     maximumFractionDigits: 0,
   }).format(value);
+
+// Los montos del cálculo de indemnización (Motor B) viajan en dólares
+// (`poliza.suma_asegurada_usd`, `siniestro.perdida_usd`, `carga.valor_usd`
+// en `ingestion/schema.py`), no en soles: por eso llevan un formateador
+// aparte de `formatMoney`, que es el de los montos reclamados de la maqueta.
+const formatUsd = (value: number) =>
+  `US$ ${new Intl.NumberFormat("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)}`;
 
 const statusStyles: Record<CaseStatus, string> = {
   Registrado: "bg-slate-100 text-slate-700 ring-slate-200",
@@ -658,55 +660,249 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
   );
 }
 
-function ConfirmationPage({ go }: { go: (screen: Screen) => void }) {
-  const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const result: AnalysisResult = searchParams.get("resultado") === "informe" ? "informe" : "faltante";
-  const isGenerated = result === "informe";
+const TITULO_VEREDICTO: Record<Veredicto, string> = {
+  APROBABLE: "Expediente aprobable",
+  APROBABLE_POR_SILENCIO: "Aprobado por silencio positivo (Art. 74 LCS)",
+  RECHAZO: "Expediente rechazado",
+  OBSERVADO: "Faltan documentos obligatorios",
+  ESCALADO: "Derivado a revisión del ajustador",
+};
 
+const DETALLE_VEREDICTO: Record<Veredicto, string> = {
+  APROBABLE: "Las seis compuertas pasaron. El informe y el cálculo de indemnización están listos.",
+  APROBABLE_POR_SILENCIO: "La aseguradora no se pronunció en plazo: el siniestro queda consentido.",
+  RECHAZO: "Una compuerta falló con evidencia. El informe cita el motivo y su fundamento legal.",
+  OBSERVADO: "El expediente está incompleto. Se generaron recordatorios a 30, 60 y 180 días.",
+  ESCALADO: "El motor no decide sin evidencia suficiente: el caso pasa al ajustador con pre-análisis.",
+};
+
+// Categoría visual del veredicto (icono/color de ConfirmationPage): distingue
+// un rechazo (negativo) de una derivación u observación (atención), en vez de
+// tratarlos igual solo por no ser una aprobación.
+const CATEGORIA_VEREDICTO: Record<Veredicto, "positivo" | "negativo" | "atencion"> = {
+  APROBABLE: "positivo",
+  APROBABLE_POR_SILENCIO: "positivo",
+  RECHAZO: "negativo",
+  OBSERVADO: "atencion",
+  ESCALADO: "atencion",
+};
+
+const ESTILO_CATEGORIA: Record<"positivo" | "negativo" | "atencion", string> = {
+  positivo: "bg-emerald-50 text-emerald-700",
+  negativo: "bg-red-50 text-red-700",
+  atencion: "bg-amber-50 text-amber-700",
+};
+
+function EstadoVacio({
+  titulo,
+  detalle,
+  go,
+  etiquetaBoton = "Nuevo siniestro",
+}: {
+  titulo: string;
+  detalle: string;
+  go: (screen: Screen) => void;
+  etiquetaBoton?: string;
+}) {
   return (
     <div className="mx-auto max-w-3xl pt-12">
       <Card className="p-8 text-center">
-        <div className={`mx-auto flex h-16 w-16 items-center justify-center rounded-full ${isGenerated ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-          {isGenerated ? <CheckCircle2 className="h-9 w-9" /> : <AlertCircle className="h-9 w-9" />}
-        </div>
-        <h1 className="mt-6 text-3xl font-bold text-slate-950">Siniestro registrado correctamente</h1>
-        <p className="mx-auto mt-3 max-w-xl text-slate-500">
-          {isGenerated
-            ? "El expediente fue analizado y quedó listo con informe generado."
-            : "El expediente fue analizado y requiere completar información documental."}
-        </p>
-        <div className="mx-auto mt-6 max-w-sm rounded-lg border border-slate-200 bg-slate-50 p-4">
-          <p className="text-sm font-semibold text-slate-500">Número de caso simulado</p>
-          <p className="mt-1 text-2xl font-bold text-brand-700">SE-2026-007</p>
-          <div className="mt-3 flex justify-center">
-            <StatusBadge status={isGenerated ? "Informe generado" : "Información faltante"} />
-          </div>
-        </div>
-        <div className="mt-8 flex flex-wrap justify-center gap-3">
-          <Button variant="secondary" onClick={() => go("dashboard")}>Volver al Dashboard</Button>
-          <Button onClick={() => navigate(`/siniestros/SE-2026-007?resultado=${result}`)}>Ver Detalle del Expediente</Button>
+        <h1 className="text-2xl font-bold text-slate-950">{titulo}</h1>
+        <p className="mt-3 text-slate-500">{detalle}</p>
+        <div className="mt-6 flex justify-center">
+          <Button onClick={() => go("new")}>{etiquetaBoton}</Button>
         </div>
       </Card>
     </div>
   );
 }
 
+function ConfirmationPage({ go }: { go: (screen: Screen) => void }) {
+  const navigate = useNavigate();
+  const resultado = leerResultado();
+
+  if (!resultado) {
+    return (
+      <EstadoVacio
+        go={go}
+        titulo="No hay ningún análisis en curso"
+        detalle="Registra un siniestro para ver su resultado."
+      />
+    );
+  }
+
+  const categoria = CATEGORIA_VEREDICTO[resultado.veredicto];
+  const Icono = categoria === "negativo" ? AlertCircle : categoria === "positivo" ? CheckCircle2 : AlertCircle;
+
+  return (
+    <div className="mx-auto max-w-3xl pt-12">
+      <Card className="p-8 text-center">
+        <div className={`mx-auto flex h-16 w-16 items-center justify-center rounded-full ${ESTILO_CATEGORIA[categoria]}`}>
+          <Icono className="h-9 w-9" />
+        </div>
+        <h1 className="mt-6 text-3xl font-bold text-slate-950">{TITULO_VEREDICTO[resultado.veredicto]}</h1>
+        <p className="mx-auto mt-3 max-w-xl text-slate-500">{DETALLE_VEREDICTO[resultado.veredicto]}</p>
+
+        <div className="mx-auto mt-6 max-w-sm rounded-lg border border-slate-200 bg-slate-50 p-4">
+          <p className="text-sm font-semibold text-slate-500">Número de caso</p>
+          <p className="mt-1 text-2xl font-bold text-brand-700">{resultado.caso_id}</p>
+          <div className="mt-3 flex justify-center">
+            <StatusBadge status={estadoDeVeredicto(resultado.veredicto)} />
+          </div>
+        </div>
+
+        <div className="mt-8 flex flex-wrap justify-center gap-3">
+          <Button variant="secondary" onClick={() => go("dashboard")}>Volver al Dashboard</Button>
+          <Button onClick={() => navigate(`/siniestros/${resultado.caso_id}`)}>Ver Detalle del Expediente</Button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+const ESTILO_ESTADO_GATE: Record<string, string> = {
+  PASS: "bg-emerald-50 text-emerald-800 ring-emerald-200",
+  FAIL: "bg-red-50 text-red-800 ring-red-200",
+  INCONCLUSO: "bg-amber-50 text-amber-800 ring-amber-200",
+  OBSERVADO: "bg-amber-50 text-amber-800 ring-amber-200",
+  SILENCIO: "bg-blue-50 text-blue-800 ring-blue-200",
+};
+
+const ESTILO_CONFIANZA: Record<Confianza, string> = {
+  alta: "bg-emerald-50 text-emerald-800 ring-emerald-200",
+  media: "bg-amber-50 text-amber-800 ring-amber-200",
+  baja: "bg-red-50 text-red-800 ring-red-200",
+};
+
+/** El valor de un campo de evidencia puede ser un escalar, una lista o un
+ *  objeto (`poliza.garantias` es una lista de objetos, por ejemplo): un
+ *  `String(valor)` ingenuo imprimiría "[object Object]" para esos casos. Se
+ *  muestra el string tal cual y se serializa cualquier otra cosa. */
+function formatearValorEvidencia(valor: ValorJson): string {
+  return typeof valor === "string" ? valor : JSON.stringify(valor);
+}
+
+/** El corazón de la demo: cada compuerta (G1..G6) con su estado, su motivo y
+ *  la evidencia citada junto al documento del que salió cada dato. Sustituye
+ *  a las tres "Observaciones" hardcodeadas que traía la maqueta. */
+function TrazaMotor({ traza }: { traza: PasoTraza[] }) {
+  if (traza.length === 0) {
+    return (
+      <div>
+        <p className="font-bold text-slate-950">Traza de la decisión</p>
+        <p className="mt-2 text-sm text-slate-500">
+          El motor no llegó a evaluar la cascada de compuertas: la extracción no obtuvo los datos
+          núcleo necesarios para decidir (ver «Extracción incompleta»).
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <p className="font-bold text-slate-950">Traza de la decisión</p>
+      <p className="mt-1 text-sm text-slate-500">
+        Cada compuerta, su motivo y la evidencia con el documento que la respalda.
+      </p>
+      <ol className="mt-4 space-y-3">
+        {traza.map((paso) => (
+          <li key={paso.gate} className="rounded-lg border border-slate-200 bg-white p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-bold text-slate-900">
+                {paso.gate} · {paso.nombre}
+              </p>
+              <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${ESTILO_ESTADO_GATE[paso.estado] ?? "bg-slate-100 text-slate-700 ring-slate-200"}`}>
+                {paso.estado}
+              </span>
+            </div>
+            {paso.estado !== "PASS" && paso.motivo && <p className="mt-2 text-sm text-slate-600">{paso.motivo}</p>}
+            {paso.estado !== "PASS" && !!paso.evidencia?.length && (
+              <ul className="mt-3 space-y-1.5 border-t border-slate-100 pt-3">
+                {paso.evidencia.map((e) => (
+                  <li key={e.campo} className="flex flex-wrap items-baseline gap-x-2 text-xs">
+                    <span className="font-semibold text-slate-500">{e.campo}</span>
+                    <span className="font-bold text-slate-900">{formatearValorEvidencia(e.valor)}</span>
+                    <span className="text-slate-400">— fuente: {e.fuente ?? "no determinada"}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** El pre-análisis de la capa IA de lectura: nunca decide, solo lee y cita
+ *  evidencia de los documentos para ayudar al ajustador en un caso ESCALADO.
+ *  `compuerta` es la última compuerta de la traza (sobre la que el lector
+ *  fue consultado: ver `lectura/__init__.py::anotar_evidencia`). */
+function PanelPreAnalisisIA({ preAnalisis, compuerta }: { preAnalisis: PreAnalisisIA; compuerta?: PasoTraza }) {
+  return (
+    <div className="rounded-lg border border-violet-200 bg-violet-50/60 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-bold text-slate-950">Pre-análisis de lectura IA</p>
+        <span className={`rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${ESTILO_CONFIANZA[preAnalisis.confianza]}`}>
+          Confianza {preAnalisis.confianza} · {preAnalisis.proveedor}
+        </span>
+      </div>
+      {compuerta && (
+        <p className="mt-1 text-xs font-semibold text-violet-700">
+          Sobre la compuerta {compuerta.gate} · {compuerta.nombre}
+        </p>
+      )}
+      {preAnalisis.resuelto ? (
+        <>
+          {preAnalisis.hallazgo && <p className="mt-3 text-sm text-slate-700">{preAnalisis.hallazgo}</p>}
+          {preAnalisis.evidencia && (
+            <blockquote className="mt-3 border-l-4 border-violet-300 pl-3 text-sm italic text-slate-600">
+              “{preAnalisis.evidencia}”
+            </blockquote>
+          )}
+          {preAnalisis.documento && (
+            <p className="mt-2 text-xs font-semibold text-slate-500">Documento fuente: {preAnalisis.documento}</p>
+          )}
+        </>
+      ) : (
+        <p className="mt-3 text-sm text-slate-600">
+          El asistente de lectura no encontró evidencia concluyente en los documentos disponibles.
+          El caso requiere revisión directa del ajustador.
+        </p>
+      )}
+      <p className="mt-3 text-xs text-slate-400">
+        El asistente de lectura solo cita evidencia de los documentos: nunca decide el veredicto.
+      </p>
+    </div>
+  );
+}
+
 function DetailPage({ go }: { go: (screen: Screen) => void }) {
-  const item = featuredCase;
   const navigate = useNavigate();
   const location = useLocation();
-  const [searchParams] = useSearchParams();
-  const initialResult: AnalysisResult = searchParams.get("resultado") === "informe" ? "informe" : "faltante";
-  const [detailResult, setDetailResult] = useState<AnalysisResult>(initialResult);
-  const isGenerated = detailResult === "informe";
-  const visibleDocuments = isGenerated
-    ? item.documents.map((doc) => ({ ...doc, status: "Recibido" as const }))
-    : item.documents;
-  const setSuccessfulDetail = () => {
-    setDetailResult("informe");
-    navigate(`${location.pathname}?resultado=informe`, { replace: true });
-  };
+  const resultado = leerResultado();
+
+  if (!resultado) {
+    return (
+      <EstadoVacio
+        go={go}
+        titulo="No hay ningún expediente analizado"
+        detalle="Registra un siniestro para ver su detalle."
+      />
+    );
+  }
+
+  const estado = estadoDeVeredicto(resultado.veredicto);
+  const indem = resultado.indemnizacion;
+  // El importe vive en `indemnizacion.indemnizacion` (no en un campo `monto`,
+  // que no existe): y solo se pinta si `calculable` es verdadero, para no
+  // mostrar nunca una cifra engañosa.
+  const montoIndemnizacion = !indem
+    ? "No aplica a este veredicto"
+    : indem.calculable
+      ? formatUsd(indem.indemnizacion)
+      : "No calculable con los datos disponibles";
+  const ultimaCompuerta = resultado.traza.length ? resultado.traza[resultado.traza.length - 1] : undefined;
 
   return (
     <div className="space-y-6">
@@ -714,74 +910,103 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
         <div>
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-3xl font-bold text-slate-950">Detalle del Expediente</h1>
-            <StatusBadge status={isGenerated ? "Informe generado" : "Información faltante"} />
+            <StatusBadge status={estado} />
           </div>
           <p className="mt-1 text-slate-500">
-            {isGenerated
-              ? `Expediente ${item.id} con documentación completa e informe listo.`
-              : `Expediente ${item.id} con observaciones documentales generadas de forma simulada.`}
+            Expediente {resultado.caso_id} · {TITULO_VEREDICTO[resultado.veredicto]}
           </p>
         </div>
-        <div className="flex flex-wrap gap-3">
-          {!isGenerated && (
-            <Button variant="secondary" onClick={setSuccessfulDetail} icon={<CheckCircle2 className="h-4 w-4" />}>
-              Simular informe generado
-            </Button>
-          )}
+        {resultado.informe_md && (
           <Button onClick={() => navigate(`${location.pathname}/informe`)} icon={<FileText className="h-4 w-4" />}>
-            {isGenerated ? "Ver informe final" : "Generar informe final"}
+            Ver informe final
           </Button>
-        </div>
+        )}
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[0.85fr_0.8fr_1.1fr]">
-        <Card className="p-6">
-          <h2 className="text-lg font-bold text-slate-950">Información del caso</h2>
-          <dl className="mt-5 space-y-4 text-sm">
-            {[
-              ["N° Caso", item.id],
-              ["Aseguradora", item.insurer],
-              ["Asegurado", item.insured],
-              ["Corredor", item.broker],
-              ["Póliza", item.policyNumber],
-              ["Monto reclamado", formatMoney(item.claimedAmount)],
-              ["Estado actual", isGenerated ? "Informe generado" : "Información faltante"],
-            ].map(([label, value]) => (
-              <div key={label} className="flex justify-between gap-5 border-b border-slate-100 pb-3">
-                <dt className="font-semibold text-slate-500">{label}</dt>
-                <dd className="text-right font-bold text-slate-900">{value}</dd>
-              </div>
-            ))}
-          </dl>
-        </Card>
-
-        <Card className="p-6">
-          <h2 className="text-lg font-bold text-slate-950">Documentos</h2>
-          <div className="mt-5 space-y-3">
-            {visibleDocuments.map((doc) => (
-              <div key={doc.name} className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
-                <div className="flex items-center gap-3">
-                  {doc.status === "Recibido" ? <CheckCircle2 className="h-5 w-5 text-emerald-600" /> : <Clock3 className="h-5 w-5 text-amber-600" />}
-                  <p className="text-sm font-semibold text-slate-800">{doc.name}</p>
+      <div className="grid gap-6 xl:grid-cols-[0.9fr_1.6fr]">
+        <div className="space-y-6">
+          <Card className="p-6">
+            <h2 className="text-lg font-bold text-slate-950">Resumen</h2>
+            <dl className="mt-5 space-y-4 text-sm">
+              {[
+                ["N° Caso", resultado.caso_id],
+                ["Veredicto", resultado.veredicto],
+                ["Escenario", resultado.clasificacion?.escenario ?? "—"],
+                ["Confianza de clasificación", resultado.clasificacion?.confianza ?? "—"],
+                ["Indemnización", montoIndemnizacion],
+              ].map(([label, value]) => (
+                <div key={label} className="flex justify-between gap-5 border-b border-slate-100 pb-3">
+                  <dt className="font-semibold text-slate-500">{label}</dt>
+                  <dd className="text-right font-bold text-slate-900">{value}</dd>
                 </div>
-                <span className={`rounded-full px-2 py-1 text-xs font-bold ${doc.status === "Recibido" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                  {doc.status}
-                </span>
+              ))}
+            </dl>
+            {!!resultado.flags.length && (
+              <div className="mt-5 flex flex-wrap gap-2">
+                {resultado.flags.map((f) => (
+                  <span key={f} className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-800 ring-1 ring-amber-200">
+                    {f}
+                  </span>
+                ))}
               </div>
-            ))}
-          </div>
-          {isGenerated ? (
-            <div className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-4">
-              <p className="font-bold text-emerald-900">Documentación completa</p>
-              <p className="mt-1 text-sm text-emerald-800">Los documentos mínimos fueron identificados y validados visualmente.</p>
-            </div>
-          ) : (
-            <div className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4">
-              <p className="font-bold text-amber-900">Documentos faltantes</p>
-              <p className="mt-1 text-sm text-amber-800">Guías de remisión requeridas para completar la revisión.</p>
-            </div>
+            )}
+          </Card>
+
+          {!!indem?.calculable && !!indem.detalle.length && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Detalle del cálculo</h2>
+              <ul className="mt-4 space-y-2 text-sm text-slate-600">
+                {indem.detalle.map((linea) => (
+                  <li key={linea} className="rounded-lg border border-slate-200 bg-slate-50 p-3">{linea}</li>
+                ))}
+              </ul>
+            </Card>
           )}
-        </Card>
+
+          {resultado.veredicto === "OBSERVADO" && !!resultado.faltantes.length && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Documentos faltantes</h2>
+              <ul className="mt-4 space-y-2">
+                {resultado.faltantes.map((d) => (
+                  <li key={d} className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+                    <Clock3 className="h-4 w-4 shrink-0" />
+                    {d}
+                  </li>
+                ))}
+              </ul>
+              {!!resultado.recordatorios?.length && (
+                <p className="mt-4 text-sm text-slate-500">
+                  Recordatorios: {resultado.recordatorios.map((r) => `${r.dias}d (${r.fecha ?? "fecha base no disponible"})`).join(" · ")}
+                </p>
+              )}
+            </Card>
+          )}
+
+          {!!resultado.problemas_extraccion.length && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Extracción incompleta</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                {resultado.motivo ?? "El motor no decide sin estos datos: el caso se deriva al ajustador."}
+              </p>
+              <ul className="mt-4 space-y-2 text-sm text-slate-600">
+                {resultado.problemas_extraccion.map((p) => (
+                  <li key={p} className="rounded-lg border border-slate-200 bg-slate-50 p-3 font-mono text-xs">{p}</li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
+          {resultado.discrepancia_escenario && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Discrepancia de escenario</h2>
+              <p className="mt-2 text-sm text-slate-600">
+                La extracción trajo el escenario <strong>{resultado.discrepancia_escenario.extraido}</strong>, pero el
+                clasificador calculó <strong>{resultado.discrepancia_escenario.clasificado}</strong>. El motor no pisa
+                uno con el otro: queda para revisión humana.
+              </p>
+            </Card>
+          )}
+        </div>
 
         <Card className="overflow-hidden">
           <div className="border-b border-violet-100 bg-violet-50 p-6">
@@ -790,52 +1015,37 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
                 <Bot className="h-6 w-6" />
               </div>
               <div>
-                <h2 className="text-lg font-bold text-slate-950">Análisis Inteligente del Expediente</h2>
-                <p className="text-sm text-violet-700">Resultado simulado del Asistente IA</p>
+                <h2 className="text-lg font-bold text-slate-950">Análisis del expediente</h2>
+                <p className="text-sm text-violet-700">Motor de reglas · decisión trazable</p>
               </div>
             </div>
           </div>
           <div className="space-y-5 p-6">
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="rounded-lg border border-slate-200 bg-white p-4">
-                <p className="text-sm font-semibold text-slate-500">Estado</p>
-                <p className={`mt-1 text-lg font-bold ${isGenerated ? "text-emerald-700" : "text-amber-700"}`}>
-                  {isGenerated ? "Informe generado" : "Información faltante"}
-                </p>
+                <p className="text-sm font-semibold text-slate-500">Escenario clasificado</p>
+                <p className="mt-1 text-lg font-bold text-slate-950">{resultado.clasificacion?.escenario ?? "—"}</p>
+                {resultado.clasificacion?.motivo && (
+                  <p className="mt-1 text-xs text-slate-500">{resultado.clasificacion.motivo}</p>
+                )}
               </div>
               <div className="rounded-lg border border-slate-200 bg-white p-4">
-                <p className="text-sm font-semibold text-slate-500">Confianza estimada</p>
-                <p className="mt-1 text-lg font-bold text-slate-950">{isGenerated ? "94%" : "78%"}</p>
+                <p className="text-sm font-semibold text-slate-500">Confianza de clasificación</p>
+                {resultado.clasificacion ? (
+                  <span className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${ESTILO_CONFIANZA[resultado.clasificacion.confianza]}`}>
+                    {resultado.clasificacion.confianza}
+                  </span>
+                ) : (
+                  <p className="mt-1 text-lg font-bold text-slate-950">—</p>
+                )}
               </div>
             </div>
-            <div>
-              <p className="font-bold text-slate-950">Observaciones</p>
-              {isGenerated ? (
-                <ol className="mt-3 space-y-3 text-sm text-slate-600">
-                  <li>1. La documentación mínima del expediente fue identificada correctamente.</li>
-                  <li>2. Las guías de remisión y facturas coinciden con la mercadería declarada.</li>
-                  <li>3. El expediente se encuentra apto para visualizar el informe final.</li>
-                </ol>
-              ) : (
-                <ol className="mt-3 space-y-3 text-sm text-slate-600">
-                  <li>1. Falta guía de remisión para validar la mercadería transportada.</li>
-                  <li>2. La factura fue identificada correctamente.</li>
-                  <li>3. La denuncia policial contiene fecha y ubicación del incidente.</li>
-                </ol>
-              )}
-            </div>
-            <div className={`rounded-lg border p-4 ${isGenerated ? "border-emerald-100 bg-emerald-50" : "border-brand-100 bg-brand-50"}`}>
-              <p className={`text-sm font-semibold ${isGenerated ? "text-emerald-700" : "text-brand-700"}`}>Próxima acción recomendada</p>
-              <p className={`mt-1 font-bold ${isGenerated ? "text-emerald-900" : "text-brand-900"}`}>
-                {isGenerated ? "Revisar el informe final con el ajustador responsable." : "Solicitar guía de remisión al asegurado o corredor."}
-              </p>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              {!isGenerated && <Button variant="secondary" icon={<Upload className="h-4 w-4" />}>Adjuntar documento faltante</Button>}
-              <Button variant="secondary" icon={<RefreshCw className="h-4 w-4" />}>Reanalizar expediente</Button>
-              <Button onClick={() => navigate(`${location.pathname}/informe`)} icon={<FileText className="h-4 w-4" />}>{isGenerated ? "Ver informe final" : "Generar informe final"}</Button>
-              {!isGenerated && <Button variant="danger" icon={<AlertCircle className="h-4 w-4" />}>Marcar como observado</Button>}
-            </div>
+
+            <TrazaMotor traza={resultado.traza} />
+
+            {resultado.veredicto === "ESCALADO" && resultado.pre_analisis_ia && (
+              <PanelPreAnalisisIA preAnalisis={resultado.pre_analisis_ia} compuerta={ultimaCompuerta} />
+            )}
           </div>
         </Card>
       </div>
@@ -843,63 +1053,196 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
   );
 }
 
+/** Convierte `**negrita**`, `` `código` `` y `_cursiva_` en nodos React.
+ *  No es un parser de Markdown general: cubre exactamente el énfasis
+ *  inline que emite `informe/reporte.py` (Motor B). */
+function textoConEnfasis(texto: string): React.ReactNode[] {
+  const partes = texto.split(/(\*\*[^*]+\*\*|`[^`]+`|_[^_]+_)/g);
+  return partes.map((parte, indice) => {
+    if (parte.startsWith("**") && parte.endsWith("**")) {
+      return (
+        <strong key={indice} className="font-bold text-slate-950">
+          {parte.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (parte.startsWith("`") && parte.endsWith("`")) {
+      return (
+        <code key={indice} className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[0.85em] text-slate-800">
+          {parte.slice(1, -1)}
+        </code>
+      );
+    }
+    if (parte.length > 2 && parte.startsWith("_") && parte.endsWith("_")) {
+      return <em key={indice}>{parte.slice(1, -1)}</em>;
+    }
+    return <span key={indice}>{parte}</span>;
+  });
+}
+
+/** Renderiza el Markdown que producen `generar_informe`/`generar_carta_sbs`
+ *  (`informe/reporte.py`): encabezados, tabla de la cascada, listas y
+ *  énfasis. No es un renderer de Markdown general — no se añadió
+ *  `react-markdown` para esta demo — sino uno acotado a lo que ese
+ *  generador realmente emite. */
+function BloqueMarkdown({ markdown }: { markdown: string }) {
+  const lineas = markdown.split("\n");
+  const bloques: React.ReactNode[] = [];
+  let i = 0;
+  let clave = 0;
+
+  const celdasDe = (fila: string) => fila.split("|").slice(1, -1).map((c) => c.trim());
+
+  while (i < lineas.length) {
+    const linea = lineas[i];
+
+    if (linea.trim() === "") {
+      i += 1;
+      continue;
+    }
+
+    if (linea.startsWith("## ")) {
+      bloques.push(
+        <h2 key={clave++} className="mt-2 text-lg font-bold text-slate-950">
+          {textoConEnfasis(linea.slice(3))}
+        </h2>,
+      );
+      i += 1;
+      continue;
+    }
+
+    if (linea.startsWith("# ")) {
+      bloques.push(
+        <h1 key={clave++} className="text-2xl font-bold text-slate-950">
+          {textoConEnfasis(linea.slice(2))}
+        </h1>,
+      );
+      i += 1;
+      continue;
+    }
+
+    if (linea.trim() === "---") {
+      bloques.push(<hr key={clave++} className="border-slate-200" />);
+      i += 1;
+      continue;
+    }
+
+    if (linea.startsWith("|")) {
+      const filas: string[] = [];
+      while (i < lineas.length && lineas[i].startsWith("|")) {
+        filas.push(lineas[i]);
+        i += 1;
+      }
+      const [encabezado, , ...datos] = filas;
+      bloques.push(
+        <div key={clave++} className="overflow-x-auto">
+          <table className="w-full min-w-[420px] border-collapse text-left text-sm">
+            <thead>
+              <tr className="border-b-2 border-slate-300">
+                {celdasDe(encabezado).map((c, idxCol) => (
+                  <th key={idxCol} className="px-3 py-2 font-bold text-slate-900">{c}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {datos.map((fila, idxFila) => (
+                <tr key={idxFila} className="border-b border-slate-100">
+                  {celdasDe(fila).map((c, idxCol) => (
+                    <td key={idxCol} className="px-3 py-2 text-slate-700">{textoConEnfasis(c)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
+    if (linea.startsWith("- ")) {
+      const items: string[] = [];
+      while (i < lineas.length && lineas[i].startsWith("- ")) {
+        items.push(lineas[i].slice(2));
+        i += 1;
+      }
+      bloques.push(
+        <ul key={clave++} className="list-disc space-y-1.5 pl-5 text-slate-700">
+          {items.map((item, idx) => (
+            <li key={idx}>{textoConEnfasis(item)}</li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+
+    bloques.push(
+      <p key={clave++} className="leading-7 text-slate-700">
+        {textoConEnfasis(linea)}
+      </p>,
+    );
+    i += 1;
+  }
+
+  return <div className="space-y-4">{bloques}</div>;
+}
+
 function ReportPage({ go }: { go: (screen: Screen) => void }) {
-  const item = cases[0];
-  const sections = [
-    ["Datos generales", `Caso ${item.id}. Aseguradora ${item.insurer}. Asegurado ${item.insured}. Póliza ${item.policyNumber}. Monto reclamado ${formatMoney(item.claimedAmount)}.`],
-    ["Antecedentes del siniestro", item.description],
-    ["Documentación revisada", "Se revisaron denuncia policial, documentos del chofer y unidad, guías de remisión y facturas vinculadas al traslado de mercadería."],
-    ["Análisis del expediente", "La documentación permite identificar fecha, ubicación, unidad involucrada, mercadería transportada y valorización preliminar del reclamo."],
-    ["Observaciones", "No se identifican documentos críticos pendientes para la emisión del informe preliminar. El contenido debe ser revisado por el ajustador responsable."],
-    ["Conclusión", "Expediente apto para informe final sujeto a revisión del ajustador y validación de cobertura según condiciones de póliza."],
-  ];
+  const navigate = useNavigate();
+  const resultado = leerResultado();
+
+  if (!resultado) {
+    return (
+      <EstadoVacio
+        go={go}
+        titulo="Todavía no hay informe"
+        detalle="Registra un siniestro para generarlo."
+      />
+    );
+  }
+
+  if (!resultado.informe_md) {
+    return (
+      <div className="mx-auto max-w-3xl pt-12">
+        <Card className="p-8 text-center">
+          <h1 className="text-2xl font-bold text-slate-950">Este expediente no tiene informe</h1>
+          <p className="mt-3 text-slate-500">
+            Expediente {resultado.caso_id}: {TITULO_VEREDICTO[resultado.veredicto]}. {DETALLE_VEREDICTO[resultado.veredicto]}
+          </p>
+          <div className="mt-6 flex flex-wrap justify-center gap-3">
+            <Button variant="secondary" onClick={() => navigate(`/siniestros/${resultado.caso_id}`)}>
+              Volver al detalle del expediente
+            </Button>
+            <Button onClick={() => go("new")}>Nuevo siniestro</Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
         <div>
           <h1 className="text-3xl font-bold text-slate-950">Informe Final</h1>
-          <p className="mt-1 text-slate-500">Vista formal generada para presentación del expediente.</p>
+          <p className="mt-1 text-slate-500">Generado por el motor. Sujeto a revisión del ajustador.</p>
         </div>
-        <div className="flex flex-wrap gap-3">
-          <Button variant="secondary" icon={<Download className="h-4 w-4" />}>Descargar PDF</Button>
-          <Button variant="secondary" icon={<Send className="h-4 w-4" />}>Enviar al ajustador</Button>
-          <Button onClick={() => go("dashboard")}>Volver al dashboard</Button>
-        </div>
+        <Button onClick={() => go("dashboard")}>Volver al dashboard</Button>
       </div>
 
       <Card className="mx-auto max-w-5xl overflow-hidden">
         <div className="border-b border-amber-200 bg-amber-50 px-8 py-4 text-sm font-semibold text-amber-900">
-          Informe generado automáticamente por el Asistente IA y sujeto a revisión del ajustador.
+          Informe generado automáticamente y sujeto a revisión del ajustador.
         </div>
         <article className="bg-white px-8 py-10 md:px-14">
-          <div className="border-b border-slate-200 pb-8">
-            <p className="text-sm font-bold uppercase tracking-wide text-brand-700">Ramo Transporte</p>
-            <h2 className="mt-3 text-4xl font-bold text-slate-950">Informe Final de Siniestro de Transporte</h2>
-            <div className="mt-6 grid gap-4 text-sm sm:grid-cols-3">
-              <div><p className="font-semibold text-slate-500">Caso</p><p className="mt-1 font-bold text-slate-950">{item.id}</p></div>
-              <div><p className="font-semibold text-slate-500">Ajustador</p><p className="mt-1 font-bold text-slate-950">{item.adjuster}</p></div>
-              <div><p className="font-semibold text-slate-500">Fecha</p><p className="mt-1 font-bold text-slate-950">27 Jun 2026</p></div>
-            </div>
-          </div>
-          <div className="mt-8 space-y-8">
-            {sections.map(([title, content]) => (
-              <section key={title}>
-                <h3 className="text-lg font-bold text-slate-950">{title}</h3>
-                <p className="mt-3 leading-7 text-slate-600">{content}</p>
-              </section>
-            ))}
-          </div>
-          <div className="mt-12 grid gap-6 border-t border-slate-200 pt-8 md:grid-cols-2">
-            <div>
-              <p className="text-sm font-semibold text-slate-500">Firma / revisión del ajustador</p>
-              <div className="mt-10 border-t border-slate-300 pt-3 font-bold text-slate-900">Enrique Custodio · Ajustador</div>
-            </div>
-            <div className="rounded-lg border border-slate-200 bg-slate-50 p-5">
-              <p className="font-bold text-slate-950">Estado del informe</p>
-              <p className="mt-2 text-sm text-slate-600">Generado automáticamente. Pendiente de validación final y aprobación interna.</p>
-            </div>
-          </div>
+          <BloqueMarkdown markdown={resultado.informe_md} />
+          {resultado.carta_sbs && (
+            <section className="mt-10 border-t border-slate-200 pt-8">
+              <h3 className="text-lg font-bold text-slate-950">Carta SBS</h3>
+              <div className="mt-3">
+                <BloqueMarkdown markdown={resultado.carta_sbs} />
+              </div>
+            </section>
+          )}
         </article>
       </Card>
     </div>
