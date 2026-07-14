@@ -193,7 +193,40 @@ export type DatosOperador = {
   escenario: string;
   prima_pagada: string;
   fecha_aviso: string;
+  /**
+   * QUÉ pasó y CUÁNDO — el aviso de siniestro propiamente dicho, y por eso este
+   * formulario es su sitio. Se le pedían a la DENUNCIA POLICIAL, que solo existe
+   * si hubo robo: en un siniestro de daño (una volcadura, mercadería mojada) no
+   * hay ninguna, y el motor no podía ni empezar. Medido sobre el corpus real: el
+   * 37% de los expedientes derivaba por esto.
+   *
+   * `fecha_ocurrencia` exige `YYYY-MM-DD`. Declararla no la vuelve confiable: el
+   * motor sigue exigiendo que otro documento la corrobore (check G1.12).
+   *
+   * `causa_declarada` debe ser UNA de las etiquetas de `CAUSAS` (ver más abajo):
+   * el motor las compara por igualdad exacta, así que una frase libre no calza y
+   * la API la trata como no declarada. Por eso en la UI es un desplegable, no un
+   * campo de texto: un desplegable no puede devolver prosa.
+   */
+  fecha_ocurrencia: string;
+  causa_declarada: string;
 };
+
+/**
+ * El vocabulario CERRADO de causas (`ingestion/vocabulario.py::CAUSAS`). No es
+ * una lista de sugerencias: `engine/rules/transporte.yaml:G3.4` hace
+ * `causa_declarada not in poliza.riesgos_cubiertos` —una pertenencia a lista,
+ * por igualdad exacta de cadena— y el deducible por riesgo calza contra estas
+ * mismas etiquetas. Cualquier otro valor no calza, y el motor deriva el caso.
+ */
+export const CAUSAS = [
+  { valor: "robo", etiqueta: "Robo (con violencia o amenaza)" },
+  { valor: "hurto", etiqueta: "Hurto (sin violencia)" },
+  { valor: "faltante", etiqueta: "Faltante de mercadería" },
+  { valor: "daño", etiqueta: "Daño a la mercadería" },
+  { valor: "apropiacion_ilicita", etiqueta: "Apropiación ilícita" },
+  { valor: "otro", etiqueta: "Otro" },
+] as const;
 
 /** Discrepancia entre un dato de operador (`DatosOperador`) y lo que ya
  *  había traído la extracción para el mismo campo: gana siempre la

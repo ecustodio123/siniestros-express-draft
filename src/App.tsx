@@ -27,6 +27,7 @@ import { useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { CaseSubCategory, CaseStatus, ClaimCase, cases, claimTypeOptions, featuredCase } from "./data/mockCases";
 import { analizarSiniestro, estadoDeVeredicto, guardarResultado, leerResultado } from "./api";
+import { CAUSAS } from "./api";
 import type { CamposExpediente, Confianza, DatosOperador, PasoTraza, PreAnalisisIA, RespuestaAnalisis, TramoCuantia, Veredicto, ValorJson } from "./api";
 
 type Screen = "login" | "dashboard" | "new" | "confirmation" | "detail" | "report";
@@ -605,6 +606,8 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
   const [archivosPorDocumento, setArchivosPorDocumento] = useState<Record<string, File[]>>({});
   const [primaPagada, setPrimaPagada] = useState<"" | "true" | "false">("");
   const [fechaAviso, setFechaAviso] = useState("");
+  const [fechaOcurrencia, setFechaOcurrencia] = useState("");
+  const [causaDeclarada, setCausaDeclarada] = useState("");
   const [analizando, setAnalizando] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -633,6 +636,8 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
         escenario: ESCENARIO_POR_SUBCATEGORIA[selectedSubCategory],
         prima_pagada: primaPagada,
         fecha_aviso: fechaAviso,
+        fecha_ocurrencia: fechaOcurrencia,
+        causa_declarada: causaDeclarada,
       };
       const respuesta = await analizarSiniestro(campos, todosLosArchivos, datosOperador);
       guardarResultado(respuesta);
@@ -750,6 +755,48 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
                 placeholder="Describa brevemente el incidente, ruta, mercadería y daños reportados."
               />
             </label>
+          </div>
+
+          {/* El aviso de siniestro: qué pasó y cuándo.
+              Estos dos NO salen de ningún documento. Se le pedían a la denuncia
+              policial —que solo existe si hubo robo—, así que en un siniestro de
+              daño el motor no podía ni empezar: el 37% de los expedientes reales
+              derivaba por esto. Ver `DatosOperador` en `api.ts`. */}
+          <div className="mt-6 rounded-lg border border-slate-200 bg-white p-4">
+            <p className="text-sm font-bold text-slate-900">El siniestro</p>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              Qué ocurrió y cuándo, según quien reclama. El motor contrasta la fecha contra la denuncia, el
+              aviso y la guía de remisión: si ningún documento la respalda, deriva el caso en vez de decidir
+              sobre ella.
+            </p>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <label className="block">
+                <span className="text-sm font-semibold text-slate-700">Fecha de ocurrencia</span>
+                <input
+                  type="date"
+                  value={fechaOcurrencia}
+                  onChange={(e) => setFechaOcurrencia(e.target.value)}
+                  className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-3 outline-none transition focus:border-brand-600 focus:ring-4 focus:ring-blue-100"
+                />
+              </label>
+              <label className="block">
+                <span className="text-sm font-semibold text-slate-700">¿Qué ocurrió?</span>
+                {/* Desplegable, NO texto libre: el motor compara la causa por igualdad
+                    exacta contra un vocabulario cerrado. Una frase no calza. */}
+                <select
+                  value={causaDeclarada}
+                  onChange={(e) => setCausaDeclarada(e.target.value)}
+                  className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-3 outline-none transition focus:border-brand-600 focus:ring-4 focus:ring-blue-100"
+                >
+                  <option value="">No especificado</option>
+                  {CAUSAS.map((causa) => (
+                    <option key={causa.valor} value={causa.valor}>
+                      {causa.etiqueta}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
           </div>
 
           <div className="mt-6 rounded-lg border border-slate-200 bg-slate-50/80 p-4">
