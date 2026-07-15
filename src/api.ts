@@ -305,6 +305,11 @@ export type RespuestaAnalisis = {
   condicionales: DocumentoCondicional[];
   etiquetas_documentos: Record<string, string>;
   datos_formulario: CamposExpediente;
+  // Supuestos que el motor asumió para poder decidir (p. ej. la vigencia de la
+  // prima, que en el POC se da por buena en vez de consultarla a cobranzas).
+  // No es una alarma: es información que se le muestra al ajustador para que
+  // sepa qué se dio por sentado. Opcional: una respuesta sin supuestos no lo trae.
+  supuestos?: string[];
 };
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";

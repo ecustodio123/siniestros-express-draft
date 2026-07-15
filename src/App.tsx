@@ -532,16 +532,6 @@ const ESCENARIO_POR_SUBCATEGORIA: Record<CaseSubCategory, string> = {
   "Tramo terrestre post importación": "I2",
 };
 
-// Opciones del control de "prima pagada". El valor vacío ("no especificado")
-// es una opción legítima, no un estado a evitar: ver `DatosOperador` en
-// `api.ts`. Si el operador no lo declara, el motor deriva el caso a revisión
-// humana por dato ausente — comportamiento correcto, no un fallo.
-const OPCIONES_PRIMA_PAGADA: { valor: "" | "true" | "false"; etiqueta: string }[] = [
-  { valor: "", etiqueta: "No especificado" },
-  { valor: "true", etiqueta: "Sí" },
-  { valor: "false", etiqueta: "No" },
-];
-
 /** Tarjeta de un documento adjuntable. `obligatorio` solo cambia el
  *  ROTULADO del estado vacío ("Pendiente" en ámbar vs. "Adjuntar si aplica"
  *  en gris neutro): un condicional sin adjuntar es normal, no una carencia
@@ -604,7 +594,6 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
   const [selectedSubCategory, setSelectedSubCategory] = useState<CaseSubCategory>(claimTypeOptions[0].subCategory);
   const [isChoosingClaimType, setIsChoosingClaimType] = useState(true);
   const [archivosPorDocumento, setArchivosPorDocumento] = useState<Record<string, File[]>>({});
-  const [primaPagada, setPrimaPagada] = useState<"" | "true" | "false">("");
   const [fechaAviso, setFechaAviso] = useState("");
   const [fechaOcurrencia, setFechaOcurrencia] = useState("");
   const [causaDeclarada, setCausaDeclarada] = useState("");
@@ -634,7 +623,10 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
       // motor (T1..I2): ver ESCENARIO_POR_SUBCATEGORIA más arriba.
       const datosOperador: DatosOperador = {
         escenario: ESCENARIO_POR_SUBCATEGORIA[selectedSubCategory],
-        prima_pagada: primaPagada,
+        // No se declara: el backend asume cobertura vigente y lo devuelve como
+        // supuesto VISIBLE (`supuestos`). Un siniestro que llega a ajuste tiene
+        // la póliza en vigor; en producción se confirma con cobranzas.
+        prima_pagada: "",
         fecha_aviso: fechaAviso,
         fecha_ocurrencia: fechaOcurrencia,
         causa_declarada: causaDeclarada,
@@ -713,6 +705,10 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
       <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
         <Card className="p-6">
           <h2 className="text-lg font-bold text-slate-950">Datos del expediente</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Datos administrativos y de referencia para identificar el expediente. No deciden el veredicto:
+            el motor resuelve a partir de los documentos que subas, no de estos campos.
+          </p>
           <div className="mt-5 grid gap-4 md:grid-cols-2">
             {CAMPOS_EXPEDIENTE.map(({ clave, etiqueta }) => (
               <label key={clave} className="block">
@@ -758,16 +754,16 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
           </div>
 
           {/* El aviso de siniestro: qué pasó y cuándo.
-              Estos dos NO salen de ningún documento. Se le pedían a la denuncia
-              policial —que solo existe si hubo robo—, así que en un siniestro de
-              daño el motor no podía ni empezar: el 37% de los expedientes reales
+              Estos campos NO salen de ningún documento — son lo único que el
+              usuario teclea por adelantado. Se le pedían a la denuncia policial
+              —que solo existe si hubo robo—, así que en un siniestro de daño el
+              motor no podía ni empezar: el 37% de los expedientes reales
               derivaba por esto. Ver `DatosOperador` en `api.ts`. */}
           <div className="mt-6 rounded-lg border border-slate-200 bg-white p-4">
             <p className="text-sm font-bold text-slate-900">El siniestro</p>
             <p className="mt-1 text-xs leading-5 text-slate-500">
-              Qué ocurrió y cuándo, según quien reclama. El motor contrasta la fecha contra la denuncia, el
-              aviso y la guía de remisión: si ningún documento la respalda, deriva el caso en vez de decidir
-              sobre ella.
+              Qué ocurrió y cuándo, según quien reclama. El motor contrasta la fecha contra los documentos
+              del expediente; si ninguno la respalda, deriva el caso a un ajustador.
             </p>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
               <label className="block">
@@ -780,6 +776,15 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
                 />
               </label>
               <label className="block">
+                <span className="text-sm font-semibold text-slate-700">Fecha de aviso a la aseguradora</span>
+                <input
+                  type="date"
+                  value={fechaAviso}
+                  onChange={(e) => setFechaAviso(e.target.value)}
+                  className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-3 outline-none transition focus:border-brand-600 focus:ring-4 focus:ring-blue-100"
+                />
+              </label>
+              <label className="block sm:col-span-2">
                 <span className="text-sm font-semibold text-slate-700">¿Qué ocurrió?</span>
                 {/* Desplegable, NO texto libre: el motor compara la causa por igualdad
                     exacta contra un vocabulario cerrado. Una frase no calza. */}
@@ -797,43 +802,9 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
                 </select>
               </label>
             </div>
-          </div>
-
-          <div className="mt-6 rounded-lg border border-slate-200 bg-slate-50/80 p-4">
-            <p className="text-sm font-bold text-slate-900">Datos que declara el operador</p>
-            <p className="mt-1 text-xs leading-5 text-slate-500">
-              Ningún documento del expediente los contiene: en producción llegarían del sistema de la
-              aseguradora. El ajustador sí los conoce. Si se dejan sin declarar, el motor deriva el caso a
-              revisión del ajustador por dato ausente — es el comportamiento correcto, no un error.
+            <p className="mt-3 text-xs text-slate-400">
+              La vigencia de la prima se asume; en producción se confirma con cobranzas.
             </p>
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              <div>
-                <span className="text-sm font-semibold text-slate-700">¿La prima está pagada?</span>
-                <div className="mt-2 inline-flex overflow-hidden rounded-lg border border-slate-200 bg-white">
-                  {OPCIONES_PRIMA_PAGADA.map((opcion) => (
-                    <button
-                      key={opcion.valor}
-                      type="button"
-                      onClick={() => setPrimaPagada(opcion.valor)}
-                      className={`px-4 py-2 text-sm font-semibold transition ${
-                        primaPagada === opcion.valor ? "bg-slate-950 text-white" : "text-slate-600 hover:bg-slate-50"
-                      }`}
-                    >
-                      {opcion.etiqueta}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <label className="block">
-                <span className="text-sm font-semibold text-slate-700">Fecha de aviso a la aseguradora</span>
-                <input
-                  type="date"
-                  value={fechaAviso}
-                  onChange={(e) => setFechaAviso(e.target.value)}
-                  className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-3 outline-none transition focus:border-brand-600 focus:ring-4 focus:ring-blue-100"
-                />
-              </label>
-            </div>
           </div>
         </Card>
 
@@ -1435,6 +1406,23 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
             </div>
 
             <TrazaMotor traza={resultado.traza} />
+
+            {/* Supuestos que el motor dio por sentados para poder decidir (p. ej.
+                la vigencia de la prima). Es información, no una alarma: se muestra
+                discreto para que el ajustador sepa qué se asumió. */}
+            {!!resultado.supuestos?.length && (
+              <div className="rounded-lg border border-amber-100 bg-amber-50/50 p-4">
+                <p className="text-sm font-bold text-amber-800">Supuestos</p>
+                <ul className="mt-2 space-y-1 text-xs text-amber-700">
+                  {resultado.supuestos.map((s) => (
+                    <li key={s} className="flex gap-2">
+                      <span className="text-amber-400">·</span>
+                      <span>{s}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             {resultado.veredicto === "ESCALADO" && resultado.pre_analisis_ia && (
               <PanelPreAnalisisIA preAnalisis={resultado.pre_analisis_ia} compuerta={ultimaCompuerta} />
