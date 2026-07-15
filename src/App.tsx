@@ -7,28 +7,30 @@ import {
   ChevronRight,
   ClipboardCheck,
   Clock3,
-  Download,
+  EyeOff,
   FileCheck2,
   FileText,
+  FileWarning,
   FolderOpen,
+  Info,
   LayoutDashboard,
-  Loader2,
   LogOut,
   Menu,
   Plus,
   RefreshCw,
   Search,
-  Send,
   ShieldCheck,
   Upload,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { CaseStatus, ClaimCase, cases, claimTypeOptions, featuredCase } from "./data/mockCases";
+import { useMemo, useState } from "react";
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { CaseSubCategory, CaseStatus, ClaimCase, cases, claimTypeOptions, featuredCase } from "./data/mockCases";
+import { analizarSiniestro, estadoDeVeredicto, guardarResultado, leerResultado } from "./api";
+import { CAUSAS } from "./api";
+import type { CamposExpediente, Confianza, DatosOperador, PasoTraza, PreAnalisisIA, RespuestaAnalisis, TramoCuantia, Veredicto, ValorJson } from "./api";
 
-type Screen = "login" | "dashboard" | "new" | "analyzing" | "confirmation" | "detail" | "report";
-type AnalysisResult = "faltante" | "informe";
+type Screen = "login" | "dashboard" | "new" | "confirmation" | "detail" | "report";
 type SortDirection = "asc" | "desc";
 type SortKey = keyof Pick<
   ClaimCase,
@@ -39,7 +41,6 @@ const routeByScreen: Record<Screen, string> = {
   login: "/login",
   dashboard: "/dashboard",
   new: "/siniestros/nuevo",
-  analyzing: "/siniestros/analizando",
   confirmation: "/siniestros/confirmacion",
   detail: `/siniestros/${featuredCase.id}`,
   report: `/siniestros/${cases[0].id}/informe`,
@@ -56,6 +57,13 @@ const formatMoney = (value: number) =>
     currency: "PEN",
     maximumFractionDigits: 0,
   }).format(value);
+
+// Los montos del cálculo de indemnización (Motor B) viajan en dólares
+// (`poliza.suma_asegurada_usd`, `siniestro.perdida_usd`, `carga.valor_usd`
+// en `ingestion/schema.py`), no en soles: por eso llevan un formateador
+// aparte de `formatMoney`, que es el de los montos reclamados de la maqueta.
+const formatUsd = (value: number) =>
+  `US$ ${new Intl.NumberFormat("es-PE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)}`;
 
 const statusStyles: Record<CaseStatus, string> = {
   Registrado: "bg-slate-100 text-slate-700 ring-slate-200",
@@ -77,11 +85,13 @@ function Button({
   onClick,
   variant = "primary",
   icon,
+  disabled = false,
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   variant?: "primary" | "secondary" | "ghost" | "danger";
   icon?: React.ReactNode;
+  disabled?: boolean;
 }) {
   const styles = {
     primary: "bg-slate-950 text-white shadow-sm shadow-slate-950/20 hover:bg-brand-700",
@@ -92,9 +102,10 @@ function Button({
 
   return (
     <button
-      className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition ${styles[variant]}`}
+      className={`inline-flex min-h-10 items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60 ${styles[variant]}`}
       onClick={onClick}
       type="button"
+      disabled={disabled}
     >
       {icon}
       {children}
@@ -501,26 +512,140 @@ function DashboardPage({ go }: { go: (screen: Screen) => void }) {
   );
 }
 
+const CAMPOS_EXPEDIENTE: { clave: keyof CamposExpediente; etiqueta: string }[] = [
+  { clave: "aseguradora", etiqueta: "Nombre de la aseguradora" },
+  { clave: "asegurado", etiqueta: "Nombre del asegurado" },
+  { clave: "corredor", etiqueta: "Nombre del corredor de seguros" },
+  { clave: "contacto", etiqueta: "Datos de contacto del asegurado" },
+  { clave: "numero_poliza", etiqueta: "Número de póliza" },
+  { clave: "monto_reclamado", etiqueta: "Monto reclamado" },
+];
+
+// Único lugar donde vive la correspondencia subcategoría -> escenario del
+// motor de reglas (T1..I2). Si el motor suma un escenario o el dashboard una
+// subcategoría, se actualiza aquí y en ningún otro sitio.
+const ESCENARIO_POR_SUBCATEGORIA: Record<CaseSubCategory, string> = {
+  "Flota propia": "T1",
+  "Transportista contratado": "T2",
+  "Responsabilidad del transportista": "T3",
+  "Tránsito internacional": "I1",
+  "Tramo terrestre post importación": "I2",
+};
+
+/** Tarjeta de un documento adjuntable. `obligatorio` solo cambia el
+ *  ROTULADO del estado vacío ("Pendiente" en ámbar vs. "Adjuntar si aplica"
+ *  en gris neutro): un condicional sin adjuntar es normal, no una carencia
+ *  — ver el comentario junto a `conditionalDocuments` en `data/mockCases.ts`. */
+function TarjetaDocumento({
+  documento,
+  archivos,
+  onSeleccionar,
+  obligatorio,
+}: {
+  documento: string;
+  archivos: File[];
+  onSeleccionar: (archivos: File[]) => void;
+  obligatorio: boolean;
+}) {
+  const tieneArchivos = archivos.length > 0;
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-4 transition hover:border-brand-200 hover:bg-white">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <div className="rounded-lg bg-white p-2 text-slate-600 shadow-sm ring-1 ring-slate-200">
+            <Upload className="h-5 w-5" />
+          </div>
+          <div>
+            <p className="font-semibold text-slate-900">{documento}</p>
+            <p className={`mt-1 text-sm font-medium ${tieneArchivos ? "text-emerald-700" : obligatorio ? "text-amber-700" : "text-slate-500"}`}>
+              {tieneArchivos
+                ? archivos.map((archivo) => archivo.name).join(", ")
+                : obligatorio
+                  ? "Pendiente"
+                  : "Adjuntar si aplica"}
+            </p>
+          </div>
+        </div>
+        <label className="shrink-0 cursor-pointer rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50">
+          Seleccionar
+          <input
+            type="file"
+            multiple
+            accept=".pdf,.jpg,.jpeg,.png,.webp"
+            className="hidden"
+            onChange={(e) => onSeleccionar(Array.from(e.target.files ?? []))}
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
 function NewCasePage({ go }: { go: (screen: Screen) => void }) {
-  const [attached, setAttached] = useState<Record<string, boolean>>({});
-  const [selectedClaimType, setSelectedClaimType] = useState(claimTypeOptions[0].subCategory);
+  const [campos, setCampos] = useState<CamposExpediente>({
+    aseguradora: "",
+    asegurado: "",
+    corredor: "",
+    contacto: "",
+    numero_poliza: "",
+    monto_reclamado: "",
+    descripcion: "",
+  });
+  const [selectedSubCategory, setSelectedSubCategory] = useState<CaseSubCategory>(claimTypeOptions[0].subCategory);
   const [isChoosingClaimType, setIsChoosingClaimType] = useState(true);
+  const [archivosPorDocumento, setArchivosPorDocumento] = useState<Record<string, File[]>>({});
+  // Documentos que NO están en el catálogo del escenario: correos, capturas,
+  // sustento extra. El asegurado puede adjuntar lo que quiera; a diferencia de
+  // las casillas requeridas (una por documento, que se reemplazan), aquí se
+  // ACUMULAN. El motor decide qué es cada uno; los que no reconoce los reporta
+  // como ignorados/ilegibles, nunca los da por leídos en silencio.
+  const [archivosAdicionales, setArchivosAdicionales] = useState<File[]>([]);
+  const [fechaAviso, setFechaAviso] = useState("");
+  const [fechaOcurrencia, setFechaOcurrencia] = useState("");
+  const [causaDeclarada, setCausaDeclarada] = useState("");
+  const [analizando, setAnalizando] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
+
   const selectedClaimTypeOption =
-    claimTypeOptions.find((option) => option.subCategory === selectedClaimType) ?? claimTypeOptions[0];
-  const docs = selectedClaimTypeOption.requiredDocuments;
+    claimTypeOptions.find((option) => option.subCategory === selectedSubCategory) ?? claimTypeOptions[0];
+  const docsObligatorios = selectedClaimTypeOption.requiredDocuments;
+  const docsCondicionales = selectedClaimTypeOption.conditionalDocuments;
   const selectedClaimTypeLabel = `${selectedClaimTypeOption.riskType} - ${selectedClaimTypeOption.subCategory}`;
-  const handleClaimTypeChange = (subCategory: string) => {
-    setSelectedClaimType(subCategory as typeof selectedClaimType);
-    setAttached({});
-  };
-  const selectClaimType = (subCategory: string) => {
-    handleClaimTypeChange(subCategory);
+  const selectClaimType = (subCategory: CaseSubCategory) => {
+    setSelectedSubCategory(subCategory);
+    setArchivosPorDocumento({});
+    setArchivosAdicionales([]);
     setIsChoosingClaimType(false);
   };
-  const sendToAnalysis = () => {
-    const result: AnalysisResult = Math.random() < 0.5 ? "faltante" : "informe";
-    navigate(`/siniestros/analizando?resultado=${result}`);
+
+  const todosLosArchivos = [...Object.values(archivosPorDocumento).flat(), ...archivosAdicionales];
+  const faltaPoliza = !(archivosPorDocumento["Póliza"]?.length);
+
+  const enviarAAnalisis = async () => {
+    setError(null);
+    setAnalizando(true);
+    try {
+      // El tipo elegido en la pantalla anterior viaja como el escenario del
+      // motor (T1..I2): ver ESCENARIO_POR_SUBCATEGORIA más arriba.
+      const datosOperador: DatosOperador = {
+        escenario: ESCENARIO_POR_SUBCATEGORIA[selectedSubCategory],
+        // No se declara: el backend asume cobertura vigente y lo devuelve como
+        // supuesto VISIBLE (`supuestos`). Un siniestro que llega a ajuste tiene
+        // la póliza en vigor; en producción se confirma con cobranzas.
+        prima_pagada: "",
+        fecha_aviso: fechaAviso,
+        fecha_ocurrencia: fechaOcurrencia,
+        causa_declarada: causaDeclarada,
+      };
+      const respuesta = await analizarSiniestro(campos, todosLosArchivos, datosOperador);
+      guardarResultado(respuesta);
+      navigate("/siniestros/confirmacion");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Fallo inesperado al analizar el expediente.");
+    } finally {
+      setAnalizando(false);
+    }
   };
 
   if (isChoosingClaimType) {
@@ -548,7 +673,10 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
                   <p className="text-xs font-bold uppercase tracking-wide text-slate-400">{option.riskType}</p>
                   <h2 className="mt-2 text-xl font-bold text-slate-950">{option.subCategory}</h2>
                   <p className="mt-3 text-sm leading-6 text-slate-500">
-                    {option.requiredDocuments.length} documentos requeridos para iniciar la revisión documental.
+                    {option.requiredDocuments.length} documentos obligatorios
+                    {option.conditionalDocuments.length > 0 &&
+                      ` · ${option.conditionalDocuments.length} condicionales (si aplica)`}
+                    {" "}para iniciar la revisión documental.
                   </p>
                 </div>
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-slate-50 text-brand-700 ring-1 ring-slate-200 transition group-hover:bg-brand-700 group-hover:text-white">
@@ -579,23 +707,25 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold text-slate-950">Nuevo Siniestro</h1>
-        <p className="mt-1 text-slate-500">Registro visual de expediente para análisis documental simulado.</p>
+        <p className="mt-1 text-slate-500">Los documentos se analizan con IA y se evalúan contra las reglas de la póliza.</p>
       </div>
       <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
         <Card className="p-6">
           <h2 className="text-lg font-bold text-slate-950">Datos del expediente</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Datos administrativos y de referencia para identificar el expediente. No deciden el veredicto:
+            el motor resuelve a partir de los documentos que subas, no de estos campos.
+          </p>
           <div className="mt-5 grid gap-4 md:grid-cols-2">
-            {[
-              "Nombre de la aseguradora",
-              "Nombre del asegurado",
-              "Nombre del corredor de seguros",
-              "Datos de contacto del asegurado",
-              "Número de póliza",
-              "Monto reclamado",
-            ].map((label) => (
-              <label key={label} className="block">
-                <span className="text-sm font-semibold text-slate-700">{label}</span>
-                <input className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-3 outline-none transition placeholder:text-slate-400 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-blue-100" placeholder={label} />
+            {CAMPOS_EXPEDIENTE.map(({ clave, etiqueta }) => (
+              <label key={clave} className="block">
+                <span className="text-sm font-semibold text-slate-700">{etiqueta}</span>
+                <input
+                  value={campos[clave]}
+                  onChange={(e) => setCampos((prev) => ({ ...prev, [clave]: e.target.value }))}
+                  className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-3 outline-none transition placeholder:text-slate-400 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-blue-100"
+                  placeholder={etiqueta}
+                />
               </label>
             ))}
             <label className="block">
@@ -621,159 +751,252 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
             </label>
             <label className="block md:col-span-2">
               <span className="text-sm font-semibold text-slate-700">Descripción del siniestro</span>
-              <textarea className="mt-2 min-h-32 w-full rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-3 outline-none transition placeholder:text-slate-400 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-blue-100" placeholder="Describa brevemente el incidente, ruta, mercadería y daños reportados." />
+              <textarea
+                value={campos.descripcion}
+                onChange={(e) => setCampos((prev) => ({ ...prev, descripcion: e.target.value }))}
+                className="mt-2 min-h-32 w-full rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-3 outline-none transition placeholder:text-slate-400 focus:border-brand-600 focus:bg-white focus:ring-4 focus:ring-blue-100"
+                placeholder="Describa brevemente el incidente, ruta, mercadería y daños reportados."
+              />
             </label>
+          </div>
+
+          {/* El aviso de siniestro: qué pasó y cuándo.
+              Estos campos NO salen de ningún documento — son lo único que el
+              usuario teclea por adelantado. Se le pedían a la denuncia policial
+              —que solo existe si hubo robo—, así que en un siniestro de daño el
+              motor no podía ni empezar: el 37% de los expedientes reales
+              derivaba por esto. Ver `DatosOperador` en `api.ts`. */}
+          <div className="mt-6 rounded-lg border border-slate-200 bg-white p-4">
+            <p className="text-sm font-bold text-slate-900">El siniestro</p>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              Qué ocurrió y cuándo, según quien reclama. El motor contrasta la fecha contra los documentos
+              del expediente; si ninguno la respalda, deriva el caso a un ajustador.
+            </p>
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <label className="block">
+                <span className="text-sm font-semibold text-slate-700">Fecha de ocurrencia</span>
+                <input
+                  type="date"
+                  value={fechaOcurrencia}
+                  onChange={(e) => setFechaOcurrencia(e.target.value)}
+                  className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-3 outline-none transition focus:border-brand-600 focus:ring-4 focus:ring-blue-100"
+                />
+              </label>
+              <label className="block">
+                <span className="text-sm font-semibold text-slate-700">Fecha de aviso a la aseguradora</span>
+                <input
+                  type="date"
+                  value={fechaAviso}
+                  onChange={(e) => setFechaAviso(e.target.value)}
+                  className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-3 outline-none transition focus:border-brand-600 focus:ring-4 focus:ring-blue-100"
+                />
+              </label>
+              <label className="block sm:col-span-2">
+                <span className="text-sm font-semibold text-slate-700">¿Qué ocurrió?</span>
+                {/* Desplegable, NO texto libre: el motor compara la causa por igualdad
+                    exacta contra un vocabulario cerrado. Una frase no calza. */}
+                <select
+                  value={causaDeclarada}
+                  onChange={(e) => setCausaDeclarada(e.target.value)}
+                  className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-3 outline-none transition focus:border-brand-600 focus:ring-4 focus:ring-blue-100"
+                >
+                  <option value="">No especificado</option>
+                  {CAUSAS.map((causa) => (
+                    <option key={causa.valor} value={causa.valor}>
+                      {causa.etiqueta}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <p className="mt-3 text-xs text-slate-400">
+              La vigencia de la prima se asume; en producción se confirma con cobranzas.
+            </p>
           </div>
         </Card>
 
         <Card className="p-6">
           <h2 className="text-lg font-bold text-slate-950">Documentos requeridos</h2>
           <p className="mt-1 text-sm text-slate-500">
-            Requisitos para {selectedClaimTypeLabel}. Las tarjetas simulan la selección de archivos; no se realiza carga real.
+            Requisitos para {selectedClaimTypeLabel}. PDF o imágenes; la póliza es indispensable para evaluar la cobertura.
           </p>
           <div className="mt-5 grid gap-3">
-            {docs.map((doc) => (
-              <div key={doc} className="rounded-lg border border-slate-200 bg-slate-50/60 p-4 transition hover:border-brand-200 hover:bg-white">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-start gap-3">
-                    <div className="rounded-lg bg-white p-2 text-slate-600 shadow-sm ring-1 ring-slate-200">
-                      <Upload className="h-5 w-5" />
-                    </div>
-                    <div>
-                      <p className="font-semibold text-slate-900">{doc}</p>
-                      <p className={`mt-1 text-sm font-medium ${attached[doc] ? "text-emerald-700" : "text-amber-700"}`}>
-                        {attached[doc] ? "Adjunto simulado" : "Pendiente"}
-                      </p>
-                    </div>
-                  </div>
-                  <Button variant="secondary" onClick={() => setAttached((prev) => ({ ...prev, [doc]: true }))}>Seleccionar archivo</Button>
-                </div>
-              </div>
+            {docsObligatorios.map((documento) => (
+              <TarjetaDocumento
+                key={documento}
+                documento={documento}
+                archivos={archivosPorDocumento[documento] ?? []}
+                onSeleccionar={(archivos) => setArchivosPorDocumento((prev) => ({ ...prev, [documento]: archivos }))}
+                obligatorio
+              />
             ))}
+          </div>
+          {faltaPoliza && (
+            <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800">
+              Sin la póliza no se puede evaluar la cobertura: el expediente se derivaría a revisión humana.
+            </p>
+          )}
+
+          {docsCondicionales.length > 0 && (
+            <div className="mt-6 border-t border-slate-200 pt-5">
+              <h3 className="text-sm font-bold text-slate-900">Documentos condicionales</h3>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                Solo aplican si la aseguradora decide hacer salvamento o recupero legal (catálogo Protegia).
+                Su ausencia NO es una carencia: el motor nunca los exige para completar la revisión
+                documental (compuerta G6.1).
+              </p>
+              <div className="mt-4 grid gap-3">
+                {docsCondicionales.map((documento) => (
+                  <TarjetaDocumento
+                    key={documento}
+                    documento={documento}
+                    archivos={archivosPorDocumento[documento] ?? []}
+                    onSeleccionar={(archivos) => setArchivosPorDocumento((prev) => ({ ...prev, [documento]: archivos }))}
+                    obligatorio={false}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-6 border-t border-slate-200 pt-5">
+            <h3 className="text-sm font-bold text-slate-900">Documentos adicionales</h3>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              Cualquier otro sustento que no esté en la lista: correos, capturas, informes extra. El motor
+              revisa cada uno; si no reconoce alguno, lo reporta como no leído — nunca lo da por bueno en
+              silencio.
+            </p>
+            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="rounded-lg bg-white p-2 text-slate-600 shadow-sm ring-1 ring-slate-200">
+                    <Upload className="h-5 w-5" />
+                  </div>
+                  <p className="text-sm font-medium text-slate-500">
+                    {archivosAdicionales.length > 0
+                      ? `${archivosAdicionales.length} archivo(s) adjunto(s)`
+                      : "Adjuntar si aplica"}
+                  </p>
+                </div>
+                <label className="shrink-0 cursor-pointer rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50">
+                  Agregar
+                  <input
+                    type="file"
+                    multiple
+                    accept=".pdf,.jpg,.jpeg,.png,.webp"
+                    className="hidden"
+                    onChange={(e) => {
+                      const nuevos = Array.from(e.target.files ?? []);
+                      setArchivosAdicionales((prev) => [...prev, ...nuevos]);
+                      e.target.value = "";   // permite volver a elegir el mismo archivo
+                    }}
+                  />
+                </label>
+              </div>
+              {archivosAdicionales.length > 0 && (
+                <ul className="mt-3 grid gap-2">
+                  {archivosAdicionales.map((archivo, i) => (
+                    <li key={`${archivo.name}-${i}`} className="flex items-center justify-between gap-3 rounded-md bg-white px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200">
+                      <span className="truncate">{archivo.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => setArchivosAdicionales((prev) => prev.filter((_, j) => j !== i))}
+                        className="shrink-0 text-slate-400 transition hover:text-red-600"
+                        aria-label={`Quitar ${archivo.name}`}
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
         </Card>
       </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-800">
+          {error}
+        </div>
+      )}
+
       <div className="flex flex-wrap justify-end gap-3">
         <Button variant="ghost" onClick={() => go("dashboard")}>Cancelar</Button>
-        <Button variant="secondary">Guardar borrador</Button>
-        <Button onClick={sendToAnalysis} icon={<Bot className="h-4 w-4" />}>Enviar a análisis IA</Button>
+        <Button
+          onClick={enviarAAnalisis}
+          disabled={analizando || todosLosArchivos.length === 0}
+          icon={analizando ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
+        >
+          {analizando ? "Analizando expediente…" : "Enviar a análisis IA"}
+        </Button>
       </div>
     </div>
   );
 }
 
-function AnalyzingPage({ go }: { go: (screen: Screen) => void }) {
-  const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const result: AnalysisResult = searchParams.get("resultado") === "informe" ? "informe" : "faltante";
-  const [progress, setProgress] = useState(8);
-  const analysisSteps = [
-    "Leyendo datos generales del expediente",
-    "Validando documentos requeridos por subcategoría",
-    "Identificando observaciones y próximos pasos",
-    "Preparando resultado del análisis",
-  ];
+const TITULO_VEREDICTO: Record<Veredicto, string> = {
+  APROBABLE: "Expediente aprobable",
+  APROBABLE_POR_SILENCIO: "Aprobado por silencio positivo (Art. 74 LCS)",
+  RECHAZO: "Expediente rechazado",
+  OBSERVADO: "Faltan documentos obligatorios",
+  ESCALADO: "Derivado a revisión del ajustador",
+  FUERA_DE_ALCANCE: "Fuera del alcance del producto Express",
+};
 
-  useEffect(() => {
-    const increments = [16, 27, 41, 56, 68, 79, 88, 96, 100];
-    let index = 0;
+const DETALLE_VEREDICTO: Record<Veredicto, string> = {
+  APROBABLE: "Las seis compuertas pasaron. El informe y el cálculo de indemnización están listos.",
+  APROBABLE_POR_SILENCIO: "La aseguradora no se pronunció en plazo: el siniestro queda consentido.",
+  RECHAZO: "Una compuerta falló con evidencia. El informe cita el motivo y su fundamento legal.",
+  OBSERVADO: "El expediente está incompleto. Se generaron recordatorios a 30, 60 y 180 días.",
+  ESCALADO: "El motor no decide sin evidencia suficiente: el caso pasa al ajustador con pre-análisis.",
+  // Deliberadamente NO es un rechazo ni un problema: el reclamo supera el
+  // tope de cuantía del producto Express (US$ 10,000), pero el siniestro
+  // puede ser perfectamente válido y pagable. Se deriva al proceso de ajuste
+  // tradicional completo -no se le niega nada al asegurado-.
+  FUERA_DE_ALCANCE:
+    "El reclamo supera el tope de cuantía de este producto (US$ 10,000). No es un rechazo: el siniestro puede ser válido y pagable, y pasa al proceso de ajuste tradicional completo.",
+};
 
-    const interval = window.setInterval(() => {
-      setProgress(increments[index] ?? 100);
-      index += 1;
+// Categoría visual del veredicto (icono/color de ConfirmationPage): distingue
+// un rechazo (negativo) de una derivación u observación (atención), en vez de
+// tratarlos igual solo por no ser una aprobación. "informativo" es su propia
+// categoría -ni positiva ni negativa ni de atención-: FUERA_DE_ALCANCE no es
+// un problema del expediente, es que este producto no atiende el caso.
+const CATEGORIA_VEREDICTO: Record<Veredicto, "positivo" | "negativo" | "atencion" | "informativo"> = {
+  APROBABLE: "positivo",
+  APROBABLE_POR_SILENCIO: "positivo",
+  RECHAZO: "negativo",
+  OBSERVADO: "atencion",
+  ESCALADO: "atencion",
+  FUERA_DE_ALCANCE: "informativo",
+};
 
-      if (index > increments.length) {
-        window.clearInterval(interval);
-        navigate(`/siniestros/confirmacion?resultado=${result}`, { replace: true });
-      }
-    }, 360);
+const ESTILO_CATEGORIA: Record<"positivo" | "negativo" | "atencion" | "informativo", string> = {
+  positivo: "bg-emerald-50 text-emerald-700",
+  negativo: "bg-red-50 text-red-700",
+  atencion: "bg-amber-50 text-amber-700",
+  informativo: "bg-slate-100 text-slate-700",
+};
 
-    return () => window.clearInterval(interval);
-  }, [navigate, result]);
-
+function EstadoVacio({
+  titulo,
+  detalle,
+  go,
+  etiquetaBoton = "Nuevo siniestro",
+}: {
+  titulo: string;
+  detalle: string;
+  go: (screen: Screen) => void;
+  etiquetaBoton?: string;
+}) {
   return (
-    <div className="mx-auto flex max-w-4xl items-center justify-center py-12 lg:min-h-[calc(100vh-160px)]">
-      <Card className="w-full overflow-hidden">
-        <div className="grid lg:grid-cols-[0.9fr_1.1fr]">
-          <section className="flex flex-col justify-between bg-slate-950 p-8 text-white">
-            <div>
-              <div className="flex h-14 w-14 items-center justify-center rounded-lg bg-white/10 ring-1 ring-white/15">
-                <Bot className="h-7 w-7 text-violet-200" />
-              </div>
-              <p className="mt-8 text-xs font-bold uppercase tracking-wide text-violet-200">Asistente IA documental</p>
-              <h1 className="mt-3 text-3xl font-bold leading-tight">Generando análisis del expediente</h1>
-              <p className="mt-4 leading-7 text-slate-300">
-                Estamos simulando la revisión documental, validación de requisitos y generación preliminar del resultado del siniestro.
-              </p>
-            </div>
-            <div className="mt-10 text-sm text-slate-400">Caso simulado SE-2026-007</div>
-          </section>
-
-          <section className="p-8">
-            <div className="flex items-center gap-4">
-              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-violet-50 text-violet-700 ring-1 ring-violet-100">
-                <Loader2 className="h-8 w-8 animate-spin" />
-              </div>
-              <div>
-                <h2 className="text-2xl font-bold text-slate-950">Generando informe IA</h2>
-                <p className="mt-1 text-sm text-slate-500">Esto es una simulación visual para la demo comercial.</p>
-              </div>
-            </div>
-
-            <div className="mt-8 space-y-4">
-              {analysisSteps.map((step, index) => {
-                const stepThreshold = (index + 1) * 25;
-                const isComplete = progress >= stepThreshold;
-                const isActive = progress >= index * 25 && progress < stepThreshold;
-
-                return (
-                <div
-                  key={step}
-                  className={`flex items-center gap-3 rounded-lg border p-4 transition ${
-                    isComplete
-                      ? "border-emerald-200 bg-emerald-50"
-                      : isActive
-                        ? "border-brand-200 bg-brand-50"
-                        : "border-slate-200 bg-slate-50/70"
-                  }`}
-                >
-                  <div
-                    className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ring-1 ${
-                      isComplete
-                        ? "bg-emerald-600 text-white ring-emerald-600"
-                        : isActive
-                          ? "bg-brand-700 text-white ring-brand-700"
-                          : "bg-white text-brand-700 ring-slate-200"
-                    }`}
-                  >
-                    {isComplete ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
-                  </div>
-                  <p className="text-sm font-semibold text-slate-700">{step}</p>
-                </div>
-                );
-              })}
-            </div>
-
-            <div className="mt-8">
-              <div className="mb-2 flex items-center justify-between text-xs font-bold uppercase tracking-wide text-slate-500">
-                <span>Progreso del análisis IA</span>
-                <span>{progress}%</span>
-              </div>
-              <div className="overflow-hidden rounded-full bg-slate-100 ring-1 ring-slate-200">
-                <div
-                  className="h-2.5 rounded-full bg-brand-700 transition-all duration-300 ease-out"
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
-            </div>
-
-            <div className="mt-8 flex flex-wrap gap-3">
-              <Button variant="secondary" onClick={() => go("new")}>Volver al registro</Button>
-              <Button variant="ghost" onClick={() => navigate(`/siniestros/confirmacion?resultado=${result}`, { replace: true })}>
-                Saltar simulación
-              </Button>
-            </div>
-          </section>
+    <div className="mx-auto max-w-3xl pt-12">
+      <Card className="p-8 text-center">
+        <h1 className="text-2xl font-bold text-slate-950">{titulo}</h1>
+        <p className="mt-3 text-slate-500">{detalle}</p>
+        <div className="mt-6 flex justify-center">
+          <Button onClick={() => go("new")}>{etiquetaBoton}</Button>
         </div>
       </Card>
     </div>
@@ -782,53 +1005,216 @@ function AnalyzingPage({ go }: { go: (screen: Screen) => void }) {
 
 function ConfirmationPage({ go }: { go: (screen: Screen) => void }) {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const result: AnalysisResult = searchParams.get("resultado") === "informe" ? "informe" : "faltante";
-  const isGenerated = result === "informe";
+  const resultado = leerResultado();
+
+  if (!resultado) {
+    return (
+      <EstadoVacio
+        go={go}
+        titulo="No hay ningún análisis en curso"
+        detalle="Registra un siniestro para ver su resultado."
+      />
+    );
+  }
+
+  const categoria = CATEGORIA_VEREDICTO[resultado.veredicto];
+  const Icono =
+    categoria === "negativo"
+      ? AlertCircle
+      : categoria === "positivo"
+        ? CheckCircle2
+        : categoria === "informativo"
+          ? Info
+          : AlertCircle;
 
   return (
     <div className="mx-auto max-w-3xl pt-12">
       <Card className="p-8 text-center">
-        <div className={`mx-auto flex h-16 w-16 items-center justify-center rounded-full ${isGenerated ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-          {isGenerated ? <CheckCircle2 className="h-9 w-9" /> : <AlertCircle className="h-9 w-9" />}
+        <div className={`mx-auto flex h-16 w-16 items-center justify-center rounded-full ${ESTILO_CATEGORIA[categoria]}`}>
+          <Icono className="h-9 w-9" />
         </div>
-        <h1 className="mt-6 text-3xl font-bold text-slate-950">Siniestro registrado correctamente</h1>
-        <p className="mx-auto mt-3 max-w-xl text-slate-500">
-          {isGenerated
-            ? "El expediente fue analizado y quedó listo con informe generado."
-            : "El expediente fue analizado y requiere completar información documental."}
-        </p>
+        <h1 className="mt-6 text-3xl font-bold text-slate-950">{TITULO_VEREDICTO[resultado.veredicto]}</h1>
+        <p className="mx-auto mt-3 max-w-xl text-slate-500">{DETALLE_VEREDICTO[resultado.veredicto]}</p>
+
         <div className="mx-auto mt-6 max-w-sm rounded-lg border border-slate-200 bg-slate-50 p-4">
-          <p className="text-sm font-semibold text-slate-500">Número de caso simulado</p>
-          <p className="mt-1 text-2xl font-bold text-brand-700">SE-2026-007</p>
+          <p className="text-sm font-semibold text-slate-500">Número de caso</p>
+          <p className="mt-1 text-2xl font-bold text-brand-700">{resultado.caso_id}</p>
           <div className="mt-3 flex justify-center">
-            <StatusBadge status={isGenerated ? "Informe generado" : "Información faltante"} />
+            <StatusBadge status={estadoDeVeredicto(resultado.veredicto)} />
           </div>
         </div>
+
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <Button variant="secondary" onClick={() => go("dashboard")}>Volver al Dashboard</Button>
-          <Button onClick={() => navigate(`/siniestros/SE-2026-007?resultado=${result}`)}>Ver Detalle del Expediente</Button>
+          <Button onClick={() => navigate(`/siniestros/${resultado.caso_id}`)}>Ver Detalle del Expediente</Button>
         </div>
       </Card>
     </div>
   );
 }
 
+const ESTILO_ESTADO_GATE: Record<string, string> = {
+  PASS: "bg-emerald-50 text-emerald-800 ring-emerald-200",
+  FAIL: "bg-red-50 text-red-800 ring-red-200",
+  INCONCLUSO: "bg-amber-50 text-amber-800 ring-amber-200",
+  OBSERVADO: "bg-amber-50 text-amber-800 ring-amber-200",
+  SILENCIO: "bg-blue-50 text-blue-800 ring-blue-200",
+  // Neutro -no rojo/ámbar-: el check G1.6 no encontró un problema con el
+  // expediente, solo determinó que el caso no le corresponde a este flujo.
+  FUERA_DE_ALCANCE: "bg-slate-100 text-slate-700 ring-slate-200",
+};
+
+// Honorario fijo del tramo comercial del producto Express (checks G1.7/G1.8,
+// engine/rules/transporte.yaml; ver `TramoCuantia` en api.ts): lo que cobra
+// la ajustadora por tramitar el caso, no la indemnización del asegurado.
+const HONORARIO_TRAMO: Record<TramoCuantia, string> = {
+  I: "Tramo I · honorario US$ 120 + IGV",
+  II: "Tramo II · honorario US$ 250 + IGV",
+};
+
+const ESTILO_CONFIANZA: Record<Confianza, string> = {
+  alta: "bg-emerald-50 text-emerald-800 ring-emerald-200",
+  media: "bg-amber-50 text-amber-800 ring-amber-200",
+  baja: "bg-red-50 text-red-800 ring-red-200",
+};
+
+/** El valor de un campo de evidencia puede ser un escalar, una lista o un
+ *  objeto (`poliza.garantias` es una lista de objetos, por ejemplo): un
+ *  `String(valor)` ingenuo imprimiría "[object Object]" para esos casos. Se
+ *  muestra el string tal cual y se serializa cualquier otra cosa. */
+function formatearValorEvidencia(valor: ValorJson): string {
+  return typeof valor === "string" ? valor : JSON.stringify(valor);
+}
+
+/** El corazón de la demo: cada compuerta (G1..G6) con su estado, su motivo y
+ *  la evidencia citada junto al documento del que salió cada dato. Sustituye
+ *  a las tres "Observaciones" hardcodeadas que traía la maqueta. */
+function TrazaMotor({ traza }: { traza: PasoTraza[] }) {
+  if (traza.length === 0) {
+    return (
+      <div>
+        <p className="font-bold text-slate-950">Traza de la decisión</p>
+        <p className="mt-2 text-sm text-slate-500">
+          El motor no llegó a evaluar la cascada de compuertas: la extracción no obtuvo los datos
+          núcleo necesarios para decidir (ver «Extracción incompleta»).
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <p className="font-bold text-slate-950">Traza de la decisión</p>
+      <p className="mt-1 text-sm text-slate-500">
+        Cada compuerta, su motivo y la evidencia con el documento que la respalda.
+      </p>
+      <ol className="mt-4 space-y-3">
+        {traza.map((paso) => (
+          <li key={paso.gate} className="rounded-lg border border-slate-200 bg-white p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="font-bold text-slate-900">
+                {paso.gate} · {paso.nombre}
+              </p>
+              <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${ESTILO_ESTADO_GATE[paso.estado] ?? "bg-slate-100 text-slate-700 ring-slate-200"}`}>
+                {paso.estado}
+              </span>
+            </div>
+            {paso.estado !== "PASS" && paso.motivo && <p className="mt-2 text-sm text-slate-600">{paso.motivo}</p>}
+            {paso.estado !== "PASS" && !!paso.evidencia?.length && (
+              <ul className="mt-3 space-y-1.5 border-t border-slate-100 pt-3">
+                {paso.evidencia.map((e) => (
+                  <li key={e.campo} className="flex flex-wrap items-baseline gap-x-2 text-xs">
+                    <span className="font-semibold text-slate-500">{e.campo}</span>
+                    <span className="font-bold text-slate-900">{formatearValorEvidencia(e.valor)}</span>
+                    <span className="text-slate-400">— fuente: {e.fuente ?? "no determinada"}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** El pre-análisis de la capa IA de lectura: nunca decide, solo lee y cita
+ *  evidencia de los documentos para ayudar al ajustador en un caso ESCALADO.
+ *  `compuerta` es la última compuerta de la traza (sobre la que el lector
+ *  fue consultado: ver `lectura/__init__.py::anotar_evidencia`). */
+function PanelPreAnalisisIA({ preAnalisis, compuerta }: { preAnalisis: PreAnalisisIA; compuerta?: PasoTraza }) {
+  return (
+    <div className="rounded-lg border border-violet-200 bg-violet-50/60 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-bold text-slate-950">Pre-análisis de lectura IA</p>
+        <span className={`rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${ESTILO_CONFIANZA[preAnalisis.confianza]}`}>
+          Confianza {preAnalisis.confianza} · {preAnalisis.proveedor}
+        </span>
+      </div>
+      {compuerta && (
+        <p className="mt-1 text-xs font-semibold text-violet-700">
+          Sobre la compuerta {compuerta.gate} · {compuerta.nombre}
+        </p>
+      )}
+      {preAnalisis.resuelto ? (
+        <>
+          {preAnalisis.hallazgo && <p className="mt-3 text-sm text-slate-700">{preAnalisis.hallazgo}</p>}
+          {preAnalisis.evidencia && (
+            <blockquote className="mt-3 border-l-4 border-violet-300 pl-3 text-sm italic text-slate-600">
+              “{preAnalisis.evidencia}”
+            </blockquote>
+          )}
+          {preAnalisis.documento && (
+            <p className="mt-2 text-xs font-semibold text-slate-500">Documento fuente: {preAnalisis.documento}</p>
+          )}
+        </>
+      ) : (
+        <p className="mt-3 text-sm text-slate-600">
+          El asistente de lectura no encontró evidencia concluyente en los documentos disponibles.
+          El caso requiere revisión directa del ajustador.
+        </p>
+      )}
+      <p className="mt-3 text-xs text-slate-400">
+        El asistente de lectura solo cita evidencia de los documentos: nunca decide el veredicto.
+      </p>
+    </div>
+  );
+}
+
 function DetailPage({ go }: { go: (screen: Screen) => void }) {
-  const item = featuredCase;
   const navigate = useNavigate();
   const location = useLocation();
-  const [searchParams] = useSearchParams();
-  const initialResult: AnalysisResult = searchParams.get("resultado") === "informe" ? "informe" : "faltante";
-  const [detailResult, setDetailResult] = useState<AnalysisResult>(initialResult);
-  const isGenerated = detailResult === "informe";
-  const visibleDocuments = isGenerated
-    ? item.documents.map((doc) => ({ ...doc, status: "Recibido" as const }))
-    : item.documents;
-  const setSuccessfulDetail = () => {
-    setDetailResult("informe");
-    navigate(`${location.pathname}?resultado=informe`, { replace: true });
-  };
+  const resultado = leerResultado();
+
+  if (!resultado) {
+    return (
+      <EstadoVacio
+        go={go}
+        titulo="No hay ningún expediente analizado"
+        detalle="Registra un siniestro para ver su detalle."
+      />
+    );
+  }
+
+  const estado = estadoDeVeredicto(resultado.veredicto);
+  const indem = resultado.indemnizacion;
+  // El importe vive en `indemnizacion.indemnizacion` (no en un campo `monto`,
+  // que no existe): y solo se pinta si `calculable` es verdadero, para no
+  // mostrar nunca una cifra engañosa.
+  const montoIndemnizacion = !indem
+    ? "No aplica a este veredicto"
+    : indem.calculable
+      ? formatUsd(indem.indemnizacion)
+      : "No calculable con los datos disponibles";
+  // El tramo fija el honorario del SERVICIO de ajuste (lo que cobra la
+  // ajustadora), no la indemnización del asegurado -de ahí que se muestre
+  // aparte-. `null` no siempre significa FUERA_DE_ALCANCE: también puede ser
+  // que el motor derivó el caso antes de fijar el tramo (p.ej. pérdida
+  // valorizada ausente, check G1.9), así que el texto no asume una causa.
+  const tramoHonorario = resultado.tramo_cuantia
+    ? HONORARIO_TRAMO[resultado.tramo_cuantia]
+    : "No determinado";
+  const ultimaCompuerta = resultado.traza.length ? resultado.traza[resultado.traza.length - 1] : undefined;
 
   return (
     <div className="space-y-6">
@@ -836,76 +1222,216 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
         <div>
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-3xl font-bold text-slate-950">Detalle del Expediente</h1>
-            <StatusBadge status={isGenerated ? "Informe generado" : "Información faltante"} />
+            <StatusBadge status={estado} />
           </div>
           <p className="mt-1 text-slate-500">
-            {isGenerated
-              ? `Expediente ${item.id} con documentación completa e informe listo.`
-              : `Expediente ${item.id} con observaciones documentales generadas de forma simulada.`}
+            Expediente {resultado.caso_id} · {TITULO_VEREDICTO[resultado.veredicto]}
           </p>
         </div>
-        <div className="flex flex-wrap gap-3">
-          {!isGenerated && (
-            <Button variant="secondary" onClick={setSuccessfulDetail} icon={<CheckCircle2 className="h-4 w-4" />}>
-              Simular informe generado
-            </Button>
-          )}
+        {resultado.informe_md && (
           <Button onClick={() => navigate(`${location.pathname}/informe`)} icon={<FileText className="h-4 w-4" />}>
-            {isGenerated ? "Ver informe final" : "Generar informe final"}
+            Ver informe final
           </Button>
-        </div>
+        )}
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[0.85fr_0.8fr_1.1fr]">
-        <Card className="p-6">
-          <h2 className="text-lg font-bold text-slate-950">Información del caso</h2>
-          <dl className="mt-5 space-y-4 text-sm">
-            {[
-              ["N° Caso", item.id],
-              ["Aseguradora", item.insurer],
-              ["Asegurado", item.insured],
-              ["Corredor", item.broker],
-              ["Tipo de riesgo", item.riskType],
-              ["Sub categoría", item.subCategory],
-              ["Póliza", item.policyNumber],
-              ["Monto reclamado", formatMoney(item.claimedAmount)],
-              ["Estado actual", isGenerated ? "Informe generado" : "Información faltante"],
-            ].map(([label, value]) => (
-              <div key={label} className="flex justify-between gap-5 border-b border-slate-100 pb-3">
-                <dt className="font-semibold text-slate-500">{label}</dt>
-                <dd className="text-right font-bold text-slate-900">{value}</dd>
-              </div>
-            ))}
-          </dl>
-        </Card>
-
-        <Card className="p-6">
-          <h2 className="text-lg font-bold text-slate-950">Documentos</h2>
-          <div className="mt-5 space-y-3">
-            {visibleDocuments.map((doc) => (
-              <div key={doc.name} className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
-                <div className="flex items-center gap-3">
-                  {doc.status === "Recibido" ? <CheckCircle2 className="h-5 w-5 text-emerald-600" /> : <Clock3 className="h-5 w-5 text-amber-600" />}
-                  <p className="text-sm font-semibold text-slate-800">{doc.name}</p>
+      <div className="grid gap-6 xl:grid-cols-[0.9fr_1.6fr]">
+        <div className="space-y-6">
+          <Card className="p-6">
+            <h2 className="text-lg font-bold text-slate-950">Resumen</h2>
+            <dl className="mt-5 space-y-4 text-sm">
+              {[
+                ["N° Caso", resultado.caso_id],
+                ["Veredicto", resultado.veredicto],
+                ["Escenario", resultado.clasificacion?.escenario ?? "—"],
+                ["Confianza de clasificación", resultado.clasificacion?.confianza ?? "—"],
+                ["Tramo del servicio", tramoHonorario],
+                ["Indemnización", montoIndemnizacion],
+              ].map(([label, value]) => (
+                <div key={label} className="flex justify-between gap-5 border-b border-slate-100 pb-3">
+                  <dt className="font-semibold text-slate-500">{label}</dt>
+                  <dd className="text-right font-bold text-slate-900">{value}</dd>
                 </div>
-                <span className={`rounded-full px-2 py-1 text-xs font-bold ${doc.status === "Recibido" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                  {doc.status}
-                </span>
+              ))}
+            </dl>
+            {!!resultado.flags.length && (
+              <div className="mt-5 flex flex-wrap gap-2">
+                {resultado.flags.map((f) => (
+                  <span key={f} className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-bold text-amber-800 ring-1 ring-amber-200">
+                    {f}
+                  </span>
+                ))}
               </div>
-            ))}
-          </div>
-          {isGenerated ? (
-            <div className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-4">
-              <p className="font-bold text-emerald-900">Documentación completa</p>
-              <p className="mt-1 text-sm text-emerald-800">Los documentos mínimos fueron identificados y validados visualmente.</p>
-            </div>
-          ) : (
-            <div className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4">
-              <p className="font-bold text-amber-900">Documentos faltantes</p>
-              <p className="mt-1 text-sm text-amber-800">Guías de remisión requeridas para completar la revisión.</p>
-            </div>
+            )}
+          </Card>
+
+          {!!indem?.calculable && !!indem.detalle.length && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Detalle del cálculo</h2>
+              <ul className="mt-4 space-y-2 text-sm text-slate-600">
+                {indem.detalle.map((linea) => (
+                  <li key={linea} className="rounded-lg border border-slate-200 bg-slate-50 p-3">{linea}</li>
+                ))}
+              </ul>
+            </Card>
           )}
-        </Card>
+
+          {resultado.veredicto === "OBSERVADO" && !!resultado.faltantes.length && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Documentos faltantes</h2>
+              <ul className="mt-4 space-y-2">
+                {resultado.faltantes.map((d) => (
+                  <li key={d} className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+                    <Clock3 className="h-4 w-4 shrink-0" />
+                    {resultado.etiquetas_documentos[d] ?? d}
+                  </li>
+                ))}
+              </ul>
+              {!!resultado.recordatorios?.length && (
+                <p className="mt-4 text-sm text-slate-500">
+                  Recordatorios: {resultado.recordatorios.map((r) => `${r.dias}d (${r.fecha ?? "fecha base no disponible"})`).join(" · ")}
+                </p>
+              )}
+            </Card>
+          )}
+
+          {/* Qué le pasó a lo que SÍ se subió. Va pegada a "Documentos faltantes"
+              a propósito: es justo ahí donde el ajustador se pregunta qué le
+              falta, y donde antes se llevaba la respuesta equivocada — salía a
+              buscar un documento que ya tenía, porque un papel ilegible y un
+              papel ausente se veían igual. Las tres se resuelven distinto, así
+              que se presentan distinto. */}
+          {(!!resultado.documentos_ilegibles.length ||
+            !!resultado.documentos_ignorados.length ||
+            !!resultado.campos_descartados.length) && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Documentos que sí llegaron</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Están en el expediente, pero su contenido no llegó entero al motor.
+              </p>
+
+              <ul className="mt-4 space-y-2">
+                {resultado.documentos_ilegibles.map((d) => (
+                  <li
+                    key={`ilegible-${d.documentos.join("|")}`}
+                    className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
+                  >
+                    <p className="flex items-center gap-3 font-semibold">
+                      <FileWarning className="h-4 w-4 shrink-0" />
+                      {d.documentos.join(", ")} — no se pudo leer
+                    </p>
+                    {/* El motivo es la explicación LITERAL del modelo, no una
+                        nuestra: es lo que le dice al ajustador si vale la pena
+                        pedir un mejor escaneo o si el papel está en blanco. */}
+                    <p className="mt-1 pl-7 text-xs text-amber-800">{d.motivo}</p>
+                    <p className="mt-1 pl-7 text-xs font-medium text-amber-700">
+                      Vuelva a subirlo con mejor calidad de escaneo.
+                    </p>
+                  </li>
+                ))}
+
+                {resultado.documentos_ignorados.map((nombre) => (
+                  <li
+                    key={`ignorado-${nombre}`}
+                    className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600"
+                  >
+                    <p className="flex items-center gap-3 font-semibold text-slate-800">
+                      <EyeOff className="h-4 w-4 shrink-0" />
+                      {nombre} — no se leyó
+                    </p>
+                    <p className="mt-1 pl-7 text-xs text-slate-500">
+                      No se reconoció como un documento del expediente, así que no pesó en el
+                      veredicto. Si sí lo es, avísenos.
+                    </p>
+                  </li>
+                ))}
+
+                {resultado.campos_descartados.map((d) => (
+                  <li
+                    key={`descartado-${d.documentos.join("|")}`}
+                    className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900"
+                  >
+                    <p className="flex items-center gap-3 font-semibold">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      {d.documentos.join(", ")} — se leyó, pero no pudimos usarlo
+                    </p>
+                    {/* Este NO se arregla pidiendo documentos: el dato estaba y el
+                        fallo es nuestro. Decirle al ajustador que "falta un campo"
+                        sería mandarlo a una gestión inútil. */}
+                    <p className="mt-1 pl-7 text-xs text-rose-800">
+                      El documento se leyó correctamente, pero parte de su contenido no llegó al
+                      motor. No hace falta que envíe nada: es un problema nuestro. Contacte a
+                      soporte.
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
+          {!!resultado.condicionales.length && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Documentos condicionales del escenario</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Informativo: su ausencia nunca cuenta como faltante (compuerta G6.1).
+              </p>
+              <ul className="mt-4 space-y-2">
+                {resultado.condicionales.map((c) => (
+                  <li key={c.id} className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
+                    <p className="font-semibold text-slate-800">{resultado.etiquetas_documentos[c.id] ?? c.id}</p>
+                    <p className="mt-0.5 text-xs text-slate-500">{c.condicion}</p>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
+          {!!resultado.problemas_extraccion.length && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Extracción incompleta</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                {resultado.motivo ?? "El motor no decide sin estos datos: el caso se deriva al ajustador."}
+              </p>
+              <ul className="mt-4 space-y-2 text-sm text-slate-600">
+                {resultado.problemas_extraccion.map((p) => (
+                  <li key={p} className="rounded-lg border border-slate-200 bg-slate-50 p-3 font-mono text-xs">{p}</li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
+          {resultado.discrepancia_escenario && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Discrepancia de escenario</h2>
+              <p className="mt-2 text-sm text-slate-600">
+                La extracción trajo el escenario <strong>{resultado.discrepancia_escenario.extraido}</strong>, pero el
+                clasificador calculó <strong>{resultado.discrepancia_escenario.clasificado}</strong>. El motor no pisa
+                uno con el otro: queda para revisión humana.
+              </p>
+            </Card>
+          )}
+
+          {resultado.discrepancia_datos_operador && (
+            <Card className="p-6">
+              <h2 className="text-lg font-bold text-slate-950">Discrepancia con datos del operador</h2>
+              <p className="mt-2 text-sm text-slate-600">
+                Un dato declarado por el operador no coincidía con lo extraído del documento. Gana siempre
+                la evidencia documental; se reporta igual para que el ajustador lo revise.
+              </p>
+              <ul className="mt-3 space-y-2">
+                {Object.entries(resultado.discrepancia_datos_operador).map(([campo, valores]) => (
+                  <li key={campo} className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
+                    <p className="font-mono text-xs font-semibold text-slate-500">{campo}</p>
+                    <p className="mt-1 text-slate-700">
+                      Documento: <strong>{formatearValorEvidencia(valores.extraido)}</strong> · Operador:{" "}
+                      <strong>{formatearValorEvidencia(valores.operador)}</strong>
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+        </div>
 
         <Card className="overflow-hidden">
           <div className="border-b border-violet-100 bg-violet-50 p-6">
@@ -914,52 +1440,54 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
                 <Bot className="h-6 w-6" />
               </div>
               <div>
-                <h2 className="text-lg font-bold text-slate-950">Análisis Inteligente del Expediente</h2>
-                <p className="text-sm text-violet-700">Resultado simulado del Asistente IA</p>
+                <h2 className="text-lg font-bold text-slate-950">Análisis del expediente</h2>
+                <p className="text-sm text-violet-700">Motor de reglas · decisión trazable</p>
               </div>
             </div>
           </div>
           <div className="space-y-5 p-6">
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="rounded-lg border border-slate-200 bg-white p-4">
-                <p className="text-sm font-semibold text-slate-500">Estado</p>
-                <p className={`mt-1 text-lg font-bold ${isGenerated ? "text-emerald-700" : "text-amber-700"}`}>
-                  {isGenerated ? "Informe generado" : "Información faltante"}
-                </p>
+                <p className="text-sm font-semibold text-slate-500">Escenario clasificado</p>
+                <p className="mt-1 text-lg font-bold text-slate-950">{resultado.clasificacion?.escenario ?? "—"}</p>
+                {resultado.clasificacion?.motivo && (
+                  <p className="mt-1 text-xs text-slate-500">{resultado.clasificacion.motivo}</p>
+                )}
               </div>
               <div className="rounded-lg border border-slate-200 bg-white p-4">
-                <p className="text-sm font-semibold text-slate-500">Confianza estimada</p>
-                <p className="mt-1 text-lg font-bold text-slate-950">{isGenerated ? "94%" : "78%"}</p>
+                <p className="text-sm font-semibold text-slate-500">Confianza de clasificación</p>
+                {resultado.clasificacion ? (
+                  <span className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${ESTILO_CONFIANZA[resultado.clasificacion.confianza]}`}>
+                    {resultado.clasificacion.confianza}
+                  </span>
+                ) : (
+                  <p className="mt-1 text-lg font-bold text-slate-950">—</p>
+                )}
               </div>
             </div>
-            <div>
-              <p className="font-bold text-slate-950">Observaciones</p>
-              {isGenerated ? (
-                <ol className="mt-3 space-y-3 text-sm text-slate-600">
-                  <li>1. La documentación mínima del expediente fue identificada correctamente.</li>
-                  <li>2. Las guías de remisión y facturas coinciden con la mercadería declarada.</li>
-                  <li>3. El expediente se encuentra apto para visualizar el informe final.</li>
-                </ol>
-              ) : (
-                <ol className="mt-3 space-y-3 text-sm text-slate-600">
-                  <li>1. Falta guía de remisión para validar la mercadería transportada.</li>
-                  <li>2. La factura fue identificada correctamente.</li>
-                  <li>3. La denuncia policial contiene fecha y ubicación del incidente.</li>
-                </ol>
-              )}
-            </div>
-            <div className={`rounded-lg border p-4 ${isGenerated ? "border-emerald-100 bg-emerald-50" : "border-brand-100 bg-brand-50"}`}>
-              <p className={`text-sm font-semibold ${isGenerated ? "text-emerald-700" : "text-brand-700"}`}>Próxima acción recomendada</p>
-              <p className={`mt-1 font-bold ${isGenerated ? "text-emerald-900" : "text-brand-900"}`}>
-                {isGenerated ? "Revisar el informe final con el ajustador responsable." : "Solicitar guía de remisión al asegurado o corredor."}
-              </p>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              {!isGenerated && <Button variant="secondary" icon={<Upload className="h-4 w-4" />}>Adjuntar documento faltante</Button>}
-              <Button variant="secondary" icon={<RefreshCw className="h-4 w-4" />}>Reanalizar expediente</Button>
-              <Button onClick={() => navigate(`${location.pathname}/informe`)} icon={<FileText className="h-4 w-4" />}>{isGenerated ? "Ver informe final" : "Generar informe final"}</Button>
-              {!isGenerated && <Button variant="danger" icon={<AlertCircle className="h-4 w-4" />}>Marcar como observado</Button>}
-            </div>
+
+            <TrazaMotor traza={resultado.traza} />
+
+            {/* Supuestos que el motor dio por sentados para poder decidir (p. ej.
+                la vigencia de la prima). Es información, no una alarma: se muestra
+                discreto para que el ajustador sepa qué se asumió. */}
+            {!!resultado.supuestos?.length && (
+              <div className="rounded-lg border border-amber-100 bg-amber-50/50 p-4">
+                <p className="text-sm font-bold text-amber-800">Supuestos</p>
+                <ul className="mt-2 space-y-1 text-xs text-amber-700">
+                  {resultado.supuestos.map((s) => (
+                    <li key={s} className="flex gap-2">
+                      <span className="text-amber-400">·</span>
+                      <span>{s}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {resultado.veredicto === "ESCALADO" && resultado.pre_analisis_ia && (
+              <PanelPreAnalisisIA preAnalisis={resultado.pre_analisis_ia} compuerta={ultimaCompuerta} />
+            )}
           </div>
         </Card>
       </div>
@@ -967,63 +1495,196 @@ function DetailPage({ go }: { go: (screen: Screen) => void }) {
   );
 }
 
+/** Convierte `**negrita**`, `` `código` `` y `_cursiva_` en nodos React.
+ *  No es un parser de Markdown general: cubre exactamente el énfasis
+ *  inline que emite `informe/reporte.py` (Motor B). */
+function textoConEnfasis(texto: string): React.ReactNode[] {
+  const partes = texto.split(/(\*\*[^*]+\*\*|`[^`]+`|_[^_]+_)/g);
+  return partes.map((parte, indice) => {
+    if (parte.startsWith("**") && parte.endsWith("**")) {
+      return (
+        <strong key={indice} className="font-bold text-slate-950">
+          {parte.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (parte.startsWith("`") && parte.endsWith("`")) {
+      return (
+        <code key={indice} className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[0.85em] text-slate-800">
+          {parte.slice(1, -1)}
+        </code>
+      );
+    }
+    if (parte.length > 2 && parte.startsWith("_") && parte.endsWith("_")) {
+      return <em key={indice}>{parte.slice(1, -1)}</em>;
+    }
+    return <span key={indice}>{parte}</span>;
+  });
+}
+
+/** Renderiza el Markdown que producen `generar_informe`/`generar_carta_sbs`
+ *  (`informe/reporte.py`): encabezados, tabla de la cascada, listas y
+ *  énfasis. No es un renderer de Markdown general — no se añadió
+ *  `react-markdown` para esta demo — sino uno acotado a lo que ese
+ *  generador realmente emite. */
+function BloqueMarkdown({ markdown }: { markdown: string }) {
+  const lineas = markdown.split("\n");
+  const bloques: React.ReactNode[] = [];
+  let i = 0;
+  let clave = 0;
+
+  const celdasDe = (fila: string) => fila.split("|").slice(1, -1).map((c) => c.trim());
+
+  while (i < lineas.length) {
+    const linea = lineas[i];
+
+    if (linea.trim() === "") {
+      i += 1;
+      continue;
+    }
+
+    if (linea.startsWith("## ")) {
+      bloques.push(
+        <h2 key={clave++} className="mt-2 text-lg font-bold text-slate-950">
+          {textoConEnfasis(linea.slice(3))}
+        </h2>,
+      );
+      i += 1;
+      continue;
+    }
+
+    if (linea.startsWith("# ")) {
+      bloques.push(
+        <h1 key={clave++} className="text-2xl font-bold text-slate-950">
+          {textoConEnfasis(linea.slice(2))}
+        </h1>,
+      );
+      i += 1;
+      continue;
+    }
+
+    if (linea.trim() === "---") {
+      bloques.push(<hr key={clave++} className="border-slate-200" />);
+      i += 1;
+      continue;
+    }
+
+    if (linea.startsWith("|")) {
+      const filas: string[] = [];
+      while (i < lineas.length && lineas[i].startsWith("|")) {
+        filas.push(lineas[i]);
+        i += 1;
+      }
+      const [encabezado, , ...datos] = filas;
+      bloques.push(
+        <div key={clave++} className="overflow-x-auto">
+          <table className="w-full min-w-[420px] border-collapse text-left text-sm">
+            <thead>
+              <tr className="border-b-2 border-slate-300">
+                {celdasDe(encabezado).map((c, idxCol) => (
+                  <th key={idxCol} className="px-3 py-2 font-bold text-slate-900">{c}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {datos.map((fila, idxFila) => (
+                <tr key={idxFila} className="border-b border-slate-100">
+                  {celdasDe(fila).map((c, idxCol) => (
+                    <td key={idxCol} className="px-3 py-2 text-slate-700">{textoConEnfasis(c)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
+    if (linea.startsWith("- ")) {
+      const items: string[] = [];
+      while (i < lineas.length && lineas[i].startsWith("- ")) {
+        items.push(lineas[i].slice(2));
+        i += 1;
+      }
+      bloques.push(
+        <ul key={clave++} className="list-disc space-y-1.5 pl-5 text-slate-700">
+          {items.map((item, idx) => (
+            <li key={idx}>{textoConEnfasis(item)}</li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+
+    bloques.push(
+      <p key={clave++} className="leading-7 text-slate-700">
+        {textoConEnfasis(linea)}
+      </p>,
+    );
+    i += 1;
+  }
+
+  return <div className="space-y-4">{bloques}</div>;
+}
+
 function ReportPage({ go }: { go: (screen: Screen) => void }) {
-  const item = cases[0];
-  const sections = [
-    ["Datos generales", `Caso ${item.id}. Aseguradora ${item.insurer}. Asegurado ${item.insured}. Póliza ${item.policyNumber}. Monto reclamado ${formatMoney(item.claimedAmount)}.`],
-    ["Antecedentes del siniestro", item.description],
-    ["Documentación revisada", "Se revisaron denuncia policial, documentos del chofer y unidad, guías de remisión y facturas vinculadas al traslado de mercadería."],
-    ["Análisis del expediente", "La documentación permite identificar fecha, ubicación, unidad involucrada, mercadería transportada y valorización preliminar del reclamo."],
-    ["Observaciones", "No se identifican documentos críticos pendientes para la emisión del informe preliminar. El contenido debe ser revisado por el ajustador responsable."],
-    ["Conclusión", "Expediente apto para informe final sujeto a revisión del ajustador y validación de cobertura según condiciones de póliza."],
-  ];
+  const navigate = useNavigate();
+  const resultado = leerResultado();
+
+  if (!resultado) {
+    return (
+      <EstadoVacio
+        go={go}
+        titulo="Todavía no hay informe"
+        detalle="Registra un siniestro para generarlo."
+      />
+    );
+  }
+
+  if (!resultado.informe_md) {
+    return (
+      <div className="mx-auto max-w-3xl pt-12">
+        <Card className="p-8 text-center">
+          <h1 className="text-2xl font-bold text-slate-950">Este expediente no tiene informe</h1>
+          <p className="mt-3 text-slate-500">
+            Expediente {resultado.caso_id}: {TITULO_VEREDICTO[resultado.veredicto]}. {DETALLE_VEREDICTO[resultado.veredicto]}
+          </p>
+          <div className="mt-6 flex flex-wrap justify-center gap-3">
+            <Button variant="secondary" onClick={() => navigate(`/siniestros/${resultado.caso_id}`)}>
+              Volver al detalle del expediente
+            </Button>
+            <Button onClick={() => go("new")}>Nuevo siniestro</Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
       <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
         <div>
           <h1 className="text-3xl font-bold text-slate-950">Informe Final</h1>
-          <p className="mt-1 text-slate-500">Vista formal generada para presentación del expediente.</p>
+          <p className="mt-1 text-slate-500">Generado por el motor. Sujeto a revisión del ajustador.</p>
         </div>
-        <div className="flex flex-wrap gap-3">
-          <Button variant="secondary" icon={<Download className="h-4 w-4" />}>Descargar PDF</Button>
-          <Button variant="secondary" icon={<Send className="h-4 w-4" />}>Enviar al ajustador</Button>
-          <Button onClick={() => go("dashboard")}>Volver al dashboard</Button>
-        </div>
+        <Button onClick={() => go("dashboard")}>Volver al dashboard</Button>
       </div>
 
       <Card className="mx-auto max-w-5xl overflow-hidden">
         <div className="border-b border-amber-200 bg-amber-50 px-8 py-4 text-sm font-semibold text-amber-900">
-          Informe generado automáticamente por el Asistente IA y sujeto a revisión del ajustador.
+          Informe generado automáticamente y sujeto a revisión del ajustador.
         </div>
         <article className="bg-white px-8 py-10 md:px-14">
-          <div className="border-b border-slate-200 pb-8">
-            <p className="text-sm font-bold uppercase tracking-wide text-brand-700">Ramo Transporte</p>
-            <h2 className="mt-3 text-4xl font-bold text-slate-950">Informe Final de Siniestro de Transporte</h2>
-            <div className="mt-6 grid gap-4 text-sm sm:grid-cols-3">
-              <div><p className="font-semibold text-slate-500">Caso</p><p className="mt-1 font-bold text-slate-950">{item.id}</p></div>
-              <div><p className="font-semibold text-slate-500">Ajustador</p><p className="mt-1 font-bold text-slate-950">{item.adjuster}</p></div>
-              <div><p className="font-semibold text-slate-500">Fecha</p><p className="mt-1 font-bold text-slate-950">27 Jun 2026</p></div>
-            </div>
-          </div>
-          <div className="mt-8 space-y-8">
-            {sections.map(([title, content]) => (
-              <section key={title}>
-                <h3 className="text-lg font-bold text-slate-950">{title}</h3>
-                <p className="mt-3 leading-7 text-slate-600">{content}</p>
-              </section>
-            ))}
-          </div>
-          <div className="mt-12 grid gap-6 border-t border-slate-200 pt-8 md:grid-cols-2">
-            <div>
-              <p className="text-sm font-semibold text-slate-500">Firma / revisión del ajustador</p>
-              <div className="mt-10 border-t border-slate-300 pt-3 font-bold text-slate-900">Enrique Custodio · Ajustador</div>
-            </div>
-            <div className="rounded-lg border border-slate-200 bg-slate-50 p-5">
-              <p className="font-bold text-slate-950">Estado del informe</p>
-              <p className="mt-2 text-sm text-slate-600">Generado automáticamente. Pendiente de validación final y aprobación interna.</p>
-            </div>
-          </div>
+          <BloqueMarkdown markdown={resultado.informe_md} />
+          {resultado.carta_sbs && (
+            <section className="mt-10 border-t border-slate-200 pt-8">
+              <h3 className="text-lg font-bold text-slate-950">Carta SBS</h3>
+              <div className="mt-3">
+                <BloqueMarkdown markdown={resultado.carta_sbs} />
+              </div>
+            </section>
+          )}
         </article>
       </Card>
     </div>
@@ -1049,15 +1710,6 @@ function NewCaseRoute() {
   return (
     <AppShell screen="new" go={go}>
       <NewCasePage go={go} />
-    </AppShell>
-  );
-}
-
-function AnalyzingRoute() {
-  const go = useScreenNavigation();
-  return (
-    <AppShell screen="analyzing" go={go}>
-      <AnalyzingPage go={go} />
     </AppShell>
   );
 }
@@ -1097,7 +1749,6 @@ export default function App() {
         <Route path="/login" element={<LoginRoute />} />
         <Route path="/dashboard" element={<DashboardRoute />} />
         <Route path="/siniestros/nuevo" element={<NewCaseRoute />} />
-        <Route path="/siniestros/analizando" element={<AnalyzingRoute />} />
         <Route path="/siniestros/confirmacion" element={<ConfirmationRoute />} />
         <Route path="/siniestros/:caseId" element={<DetailRoute />} />
         <Route path="/siniestros/:caseId/informe" element={<ReportRoute />} />

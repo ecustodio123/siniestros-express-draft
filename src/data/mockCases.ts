@@ -22,38 +22,55 @@ export type ClaimTypeOption = {
   riskType: RiskType;
   subCategory: CaseSubCategory;
   requiredDocuments: string[];
+  // Documentos condicionales del catálogo Protegia 2021 (ver
+  // `engine/helpers.py::CATALOGO_PROTEGIA_2021_CONDICIONALES` en el motor):
+  // NUNCA cuentan como faltantes en la compuerta G6.1 — su ausencia es
+  // normal si la condición no aplica (p. ej. la aseguradora no hizo
+  // salvamento ni recupero legal). Se listan aparte para que la UI los
+  // ofrezca sin presentarlos como una carencia del expediente.
+  conditionalDocuments: string[];
 };
 
+// La Póliza encabeza los requisitos de las cinco subcategorías: sin ella el
+// extractor no puede obtener vigencia, prima, riesgos cubiertos ni suma
+// asegurada — campos núcleo del `case` en `ingestion/schema.py` del motor de
+// reglas. Sin este documento, `validar_case` deriva el caso a ESCALADO por
+// extracción incompleta, sin importar la subcategoría elegida.
 export const claimTypeOptions: ClaimTypeOption[] = [
   {
     riskType: "Transporte",
     subCategory: "Flota propia",
     requiredDocuments: [
+      "Póliza",
       "Denuncia Policial",
       "Proforma Valorizada de la Pérdida",
       "Factura comercial",
       "Guía de Remisión",
       "Declaración del chofer",
-      "Acta de Salvamento",
     ],
+    // "si la compañía está interesada en recoger los restos" (catálogo Protegia).
+    conditionalDocuments: ["Acta de Salvamento"],
   },
   {
     riskType: "Transporte",
     subCategory: "Transportista contratado",
     requiredDocuments: [
+      "Póliza",
       "Denuncia Policial",
       "Proforma Valorizada de la Pérdida",
       "Factura comercial",
       "Guía de Remisión",
       "Declaración del chofer",
-      "Carta de Reclamo al transportista",
-      "Acta de Salvamento",
     ],
+    // "si la compañía está interesada en hacer un recupero por la vía legal" /
+    // "si aplica" (catálogo Protegia).
+    conditionalDocuments: ["Carta de Reclamo al transportista", "Acta de Salvamento"],
   },
   {
     riskType: "Transporte",
     subCategory: "Responsabilidad del transportista",
     requiredDocuments: [
+      "Póliza",
       "Denuncia Policial",
       "Proforma Valorizada de la Pérdida",
       "Factura comercial",
@@ -61,22 +78,26 @@ export const claimTypeOptions: ClaimTypeOption[] = [
       "Declaración del chofer",
       "Carta de Reclamo del dueño de la mercadería",
     ],
+    conditionalDocuments: [],
   },
   {
     riskType: "Importaciones / Exportaciones",
     subCategory: "Tránsito internacional",
     requiredDocuments: [
+      "Póliza",
       "Conocimiento de embarque",
       "Factura Comercial",
       "Packing List",
       "Valorización de la mercadería siniestrada",
       "Volante de despacho",
     ],
+    conditionalDocuments: [],
   },
   {
     riskType: "Importaciones / Exportaciones",
     subCategory: "Tramo terrestre post importación",
     requiredDocuments: [
+      "Póliza",
       "Conocimiento de Embarque o guía aérea",
       "Factura Comercial",
       "Packing List",
@@ -85,6 +106,7 @@ export const claimTypeOptions: ClaimTypeOption[] = [
       "Guía de remisión transportista",
       "Valorización de la mercadería siniestrada",
     ],
+    conditionalDocuments: [],
   },
 ];
 
