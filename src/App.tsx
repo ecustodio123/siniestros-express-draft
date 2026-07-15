@@ -594,6 +594,12 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
   const [selectedSubCategory, setSelectedSubCategory] = useState<CaseSubCategory>(claimTypeOptions[0].subCategory);
   const [isChoosingClaimType, setIsChoosingClaimType] = useState(true);
   const [archivosPorDocumento, setArchivosPorDocumento] = useState<Record<string, File[]>>({});
+  // Documentos que NO están en el catálogo del escenario: correos, capturas,
+  // sustento extra. El asegurado puede adjuntar lo que quiera; a diferencia de
+  // las casillas requeridas (una por documento, que se reemplazan), aquí se
+  // ACUMULAN. El motor decide qué es cada uno; los que no reconoce los reporta
+  // como ignorados/ilegibles, nunca los da por leídos en silencio.
+  const [archivosAdicionales, setArchivosAdicionales] = useState<File[]>([]);
   const [fechaAviso, setFechaAviso] = useState("");
   const [fechaOcurrencia, setFechaOcurrencia] = useState("");
   const [causaDeclarada, setCausaDeclarada] = useState("");
@@ -609,10 +615,11 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
   const selectClaimType = (subCategory: CaseSubCategory) => {
     setSelectedSubCategory(subCategory);
     setArchivosPorDocumento({});
+    setArchivosAdicionales([]);
     setIsChoosingClaimType(false);
   };
 
-  const todosLosArchivos = Object.values(archivosPorDocumento).flat();
+  const todosLosArchivos = [...Object.values(archivosPorDocumento).flat(), ...archivosAdicionales];
   const faltaPoliza = !(archivosPorDocumento["Póliza"]?.length);
 
   const enviarAAnalisis = async () => {
@@ -851,6 +858,60 @@ function NewCasePage({ go }: { go: (screen: Screen) => void }) {
               </div>
             </div>
           )}
+
+          <div className="mt-6 border-t border-slate-200 pt-5">
+            <h3 className="text-sm font-bold text-slate-900">Documentos adicionales</h3>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              Cualquier otro sustento que no esté en la lista: correos, capturas, informes extra. El motor
+              revisa cada uno; si no reconoce alguno, lo reporta como no leído — nunca lo da por bueno en
+              silencio.
+            </p>
+            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="rounded-lg bg-white p-2 text-slate-600 shadow-sm ring-1 ring-slate-200">
+                    <Upload className="h-5 w-5" />
+                  </div>
+                  <p className="text-sm font-medium text-slate-500">
+                    {archivosAdicionales.length > 0
+                      ? `${archivosAdicionales.length} archivo(s) adjunto(s)`
+                      : "Adjuntar si aplica"}
+                  </p>
+                </div>
+                <label className="shrink-0 cursor-pointer rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50">
+                  Agregar
+                  <input
+                    type="file"
+                    multiple
+                    accept=".pdf,.jpg,.jpeg,.png,.webp"
+                    className="hidden"
+                    onChange={(e) => {
+                      const nuevos = Array.from(e.target.files ?? []);
+                      setArchivosAdicionales((prev) => [...prev, ...nuevos]);
+                      e.target.value = "";   // permite volver a elegir el mismo archivo
+                    }}
+                  />
+                </label>
+              </div>
+              {archivosAdicionales.length > 0 && (
+                <ul className="mt-3 grid gap-2">
+                  {archivosAdicionales.map((archivo, i) => (
+                    <li key={`${archivo.name}-${i}`} className="flex items-center justify-between gap-3 rounded-md bg-white px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200">
+                      <span className="truncate">{archivo.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => setArchivosAdicionales((prev) => prev.filter((_, j) => j !== i))}
+                        className="shrink-0 text-slate-400 transition hover:text-red-600"
+                        aria-label={`Quitar ${archivo.name}`}
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
         </Card>
       </div>
 
